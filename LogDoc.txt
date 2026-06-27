@@ -1,0 +1,48 @@
+Plans
+Input: Video
+Take image (OpenCV) -> MobileNetV3 + CoordConv Fixation Heatmaps(Torch) -> CfC LNN model -> Fixation Heatmaps -> ROI Encoding -> Bitrate compression(FFmpeg) -> Compile Output: Video
+
+Questions:
+What do we want the paper to cover?
+Data compression metrics
+A way to compute how much data can be compressed(??)
+
+Suggested evaluation structure for the white paper:
+
+Offline compression results — rate-distortion curves across several video types (talking heads, action, nature footage — gaze behavior differs a lot by content type)
+Ablation table — each component's contribution to compression ratio and VMAF
+Latency analysis — quality vs. prediction horizon N for the streaming case
+Qualitative examples — side by side frames showing where quality was allocated
+
+Baselines
+You need at least two:
+
+Naive uniform encoding — same codec, same average bitrate, no ROI. This is your floor.
+Center-weighted encoding — higher quality in the center of the frame, lower at edges. This is a common heuristic in VR and a fair comparison since center bias is well documented in eye tracking research. If GazeLNN doesn't beat this, that's an important finding.
+
+Optional stronger baseline if you want to be thorough:
+
+Static saliency ROI — DeepGaze or SALICON heatmap driving the same FFmpeg pipeline, no temporal component.
+
+Ablation studies
+Yes, absolutely worth doing. Here are meaningful ones:
+Ablation 1 — Gaze model vs. no gaze model
+
+Compare your method against uniform encoding at the same average bitrate. This is your core claim — that knowing where to look matters.
+Ablation 2 — Scanpath vs. saliency map
+
+Replace GazeLNN with a static saliency model (like DeepGaze) and compare. This tests whether the temporal scanpath information adds value over a simpler heatmap.
+Ablation 3 — Number of QP offset levels
+
+Test binary ROI (just high/low quality regions) vs. graded QP offsets that follow the heatmap probability values. Does finer granularity help?
+Ablation 4 — Reset strategy
+
+Compare resetting hidden state on scene cuts vs. never resetting vs. always resetting every N frames. Quantifies how much temporal continuity matters.
+Ablation 5 — Steps per frame
+
+1 step vs. 2 steps vs. 3 steps per frame. Measures quality-speed tradeoff.
+
+
+In compression research, instead of just showing the curves visually, there's a standard single number called Bjøntegaard Delta Rate (BD-Rate) that summarizes the area between two rate-distortion curves as a percentage. A BD-Rate of -20% means your method achieves the same quality with 20% fewer bits on average across the curve. It's the number reviewers will expect to see in a white paper alongside the curves.
+
+
