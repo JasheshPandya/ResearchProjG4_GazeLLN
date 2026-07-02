@@ -1,0 +1,3 @@
+# Ignore all video files and images
+*.mp4
+*.png
