@@ -1,3 +1,17 @@
 # Ignore all video files and images
 *.mp4
 *.png
+
+# Cython build artifacts
+build/
+*.pyd
+*.so
+ptr_extractor.c
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Pipeline output data
+output_roi_mb.mp4
+*.mp4
