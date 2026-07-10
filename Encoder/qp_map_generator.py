@@ -160,7 +160,7 @@ def main(sys_args=None):
 
     args = parser.parse_args(sys_args)
 
-    # ── Validate arguments ─────────────────────────────────────────────
+    # Validate arguments
     if args.qp_min >= args.qp_max:
         parser.error(f"qp_min ({args.qp_min}) must be less than qp_max ({args.qp_max})")
     if not (0.0 <= args.temporal_alpha <= 1.0):
@@ -168,7 +168,7 @@ def main(sys_args=None):
     if not args.video_path:
         parser.error("--video_path must be specified.")
 
-    # ── Discover and load heatmaps ─────────────────────────────────────
+    # Discover and load heatmaps
     heatmaps = []
     
         
@@ -199,12 +199,12 @@ def main(sys_args=None):
     mb_width, mb_height = mb_grid(native_width, native_height)
     print(f"Macroblock grid: {mb_width} x {mb_height} ({mb_width * mb_height} MBs/frame)")
 
-    # ── Spatial smoothing ──────────────────────────────────────────────
+    # Spatial smoothing 
     if args.spatial_sigma > 0:
         print(f"Applying spatial Gaussian smoothing (sigma={args.spatial_sigma})")
         heatmaps = [apply_spatial_smoothing(h, args.spatial_sigma) for h in heatmaps]
 
-    # ── Temporal smoothing (EMA) ───────────────────────────────────────
+    # Temporal smoothing (EMA)
     if args.temporal_alpha < 1.0:
         alpha = args.temporal_alpha
         print(f"Applying temporal EMA smoothing (alpha={alpha})")
@@ -216,15 +216,15 @@ def main(sys_args=None):
 
         heatmaps = smoothed
 
-    # ── Normalization ──────────────────────────────────────────────────
+    # Normalization
     print("Normalizing heatmaps")
     heatmaps = [normalize_heatmap(k, mb_width, mb_height) for k in heatmaps]
 
-    # ── Map to QP offsets ──────────────────────────────────────────────
+    # Map to QP offsets
     print(f"Mapping to QP offsets [{args.qp_min}, {args.qp_max}]")
     qp_offsets = [map_to_qp_offsets(h, args.qp_min, args.qp_max) for h in heatmaps]
 
-    # ── Write output ───────────────────────────────────────────────────
+    # Write output
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     for i, qp in enumerate(qp_offsets):
