@@ -260,8 +260,10 @@ def eval_epoch_with_metrics(model, loader, criterion, device):
                         orig_y = float(y * (256 / hmap_H))
                         
                         # Avoid redundant consecutive predicted points
-                        if len(pred_scanpaths[b]) == 0 or pred_scanpaths[b][-1] != [orig_x, orig_y]:
-                            pred_scanpaths[b].append([orig_x, orig_y])
+                        # Stop Removing deduplication
+                        # if len(pred_scanpaths[b]) == 0 or pred_scanpaths[b][-1] != [orig_x, orig_y]:
+                        #     pred_scanpaths[b].append([orig_x, orig_y])
+                        pred_scanpaths[b].append([orig_x, orig_y])
 
             predictions = torch.stack(predictions, dim=1)
             loss = criterion(predictions, hmap_seq, mask)
@@ -274,13 +276,10 @@ def eval_epoch_with_metrics(model, loader, criterion, device):
                     if mask[b, t]:
                         x_val = float(fix_coords[b, t, 0].cpu())
                         y_val = float(fix_coords[b, t, 1].cpu())
-                        
-                        # Avoid redundant consecutive ground truth points
-                        if len(gt_scanpath) == 0 or gt_scanpath[-1] != [x_val, y_val]:
-                            gt_scanpath.append([x_val, y_val])
+                        gt_scanpath.append([x_val, y_val])
                 
                 if len(pred_scanpaths[b]) > 0 and len(gt_scanpath) > 0:
-                    metrics_res = evaluate_metrics(np.array(pred_scanpaths[b]), np.array(gt_scanpath), tde_mode="mean")
+                    metrics_res = evaluate_metrics(np.array(pred_scanpaths[b]), np.array(gt_scanpath))
                     for k, v in metrics_res.items():
                         all_metrics[k].append(v)
 
