@@ -3,12 +3,6 @@
 *.png
 *.pdf
 
-# Cython build artifacts
-build/
-*.pyd
-*.so
-ptr_extractor.c
-
 # Python cache
 __pycache__/
 *.pyc
