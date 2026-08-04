@@ -5,11 +5,17 @@
 
 # Python cache
 __pycache__/
+.vscode/
 *.pyc
 
 # Pipeline output data
 output_roi_mb.mp4
 *.mp4
 
-#MIT LowRes Dataset for evaluation
+# MIT LowRes Dataset for evaluation
 mit_lowres_highres_only/
+
+# Diem Dataset
+DIEM/DIEM_ROOT
+DIEM/DIEM_Processed
+
