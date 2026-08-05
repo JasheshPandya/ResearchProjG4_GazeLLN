@@ -124,6 +124,19 @@ invalid frames from the loss), `delta_t (T,)` (= 1/30s per step), and
 forward from the previous window of the same video and detach before
 backprop -- truncated-BPTT stitching, done in your training loop).
 
+## Automated Pipeline Execution
+
+You can run the full sequence of steps automatically using the provided `run_diem_pipeline.py` script. It will sequentially run:
+1. `parse_gaze.py`
+2. `build_heatmaps.py`
+3. `extract_frames.py`
+4. Automatically read `calibration_report.csv`, extract all videos that do **not** need review (`needs_review == "no"`), and run `inspect_calibration.py` on them.
+5. Execute `fine_tune.py`.
+
+```bash
+python run_diem_pipeline.py
+```
+
 ## Running on the full DIEM dataset (all ~85 videos)
 
 **1. Directory setup.** Extract every video's archive so `DIEM_ROOT` looks

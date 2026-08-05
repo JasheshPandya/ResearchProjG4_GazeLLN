@@ -16,6 +16,7 @@ output_roi_mb.mp4
 mit_lowres_highres_only/
 
 # Diem Dataset
-DIEM/DIEM_ROOT
-DIEM/DIEM_Processed
+DIEM/DIEM_Processed/
+DIEM/DIEM_ROOT/
+DIEM/DIEM_ROOT.zip
 
