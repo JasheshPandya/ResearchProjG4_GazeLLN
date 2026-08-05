@@ -13,9 +13,9 @@ import cv2
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
-    sys.path.append(str(ROOT_DIR))
+    sys.path.append(str(ROOT_DIR / "DIEM"))
 
-from modeldata import GazeLLNArch
+from DIEM_Modeldata import GazeLLNArch
 
 def mb_grid(native_width = 1920, native_height = 1080):
     """
@@ -76,10 +76,10 @@ def call_model(frame: np.ndarray, checkpoint_path: str = None, dt: float = 1) ->
         
         model = GazeLLNArch().to(device)
         
-        # Determine path to best_model.pt
+        # Determine path to DIEM_model.pt
 
         if checkpoint_path is None:
-            ckpt_file = ROOT_DIR / "best_model.pt"
+            ckpt_file = ROOT_DIR / "DIEM_model.pt"
         else:
             ckpt_file = Path(checkpoint_path)
 
@@ -109,7 +109,11 @@ def call_model(frame: np.ndarray, checkpoint_path: str = None, dt: float = 1) ->
     with torch.no_grad():
         ts = torch.tensor([dt], device = device)
 
-        out_hmap, hx = model(img_tensor, _MODEL_CACHE["prev_hmap"], _MODEL_CACHE["hx"], ts)
+        # DIEM arch separates feature extraction from the recurrent forward pass.
+        # extract_features() returns (B, 960) visual features from MobileNet.
+        vis_features = model.extract_features(img_tensor)
+
+        out_hmap, hx = model(vis_features, _MODEL_CACHE["prev_hmap"], _MODEL_CACHE["hx"], ts)
         # Update recurrent state cache for next frame
         _MODEL_CACHE["prev_hmap"] = out_hmap
         _MODEL_CACHE["hx"] = hx
