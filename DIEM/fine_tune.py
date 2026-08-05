@@ -2,7 +2,7 @@
 Fine-tuning loop for GazeLLNArch on continuous video (DIEM), building on
 dataset.py's rolling-window Dataset -- rewritten against the ACTUAL model in
 modeldata.py and the real training conventions in trainGazeLNN.ipynb (which
-produced best_model.pt), not an earlier draft. Concretely, this version
+produced OSIE_model.pt), not an earlier draft. Concretely, this version
 matches (and was verified against, see the chat writeup) the following:
 
   1. forward() takes precomputed `vis_features` (B, 960), not raw images --
@@ -69,7 +69,7 @@ def _gaussian_heatmap(x, y, img_w, img_h, hmap_w, hmap_h, sigma=1.5):
 def _center_gaussian(batch_size, hmap_h, hmap_w, device, sigma=1.5):
     """Gaussian blob at the heatmap center. Shape: (B, 1, hmap_h, hmap_w).
     Ported from trainGazeLNN.ipynb so the fine-tuning prior matches what
-    best_model.pt was actually trained with."""
+    OSIE.pt was actually trained with."""
     hmap = _gaussian_heatmap(
         x=hmap_w / 2, y=hmap_h / 2,
         img_w=hmap_w, img_h=hmap_h, hmap_w=hmap_w, hmap_h=hmap_h, sigma=sigma,
@@ -254,7 +254,7 @@ def fine_tune(
     train_backbone: bool = False,
     unfreeze_backbone_after_epoch: Optional[int] = None,
     pretrained_checkpoint: Optional[str] = None,
-    checkpoint: str = "GazeLNN_diem_finetuned.pt",
+    checkpoint: str = "DIEM_model.pt",
     use_amp: bool = True,
 ):
     if pretrained_checkpoint is not None:
@@ -335,14 +335,14 @@ if __name__ == "__main__":
     # Edit these directly to configure a run -- no command-line flags.
     # -----------------------------------------------------------------------
     RUN_CONFIG = dict(
-        pretrained_checkpoint="best_model.pt",   # your OSIE-trained checkpoint to fine-tune from; None to train from scratch
-        checkpoint="GazeLNN_diem_finetuned.pt",  # where the best fine-tuned checkpoint gets saved
+        pretrained_checkpoint="OSIE.pt",   # your OSIE-trained checkpoint to fine-tune from; None to train from scratch
+        checkpoint="DIEM_model.pt",  # where the best fine-tuned checkpoint gets saved
         epochs=100,
         backbone_lr=1e-6,
         head_lr=1e-4,
         patience=20,
  
-        # False (default) matches how best_model.pt was actually trained --
+        # False (default) matches how OSIE.pt was actually trained --
         # the backbone stayed frozen for its entire OSIE run. Set True to
         # let it adapt to video frames instead.
         train_backbone=False,
@@ -355,7 +355,7 @@ if __name__ == "__main__":
         # False (default) matches trainGazeLNN.ipynb's free-running
         # autoregressive training (prev_hmap = model's own last prediction).
         # True uses ground-truth teacher forcing instead -- a legitimate
-        # alternative, just not what best_model.pt was trained with.
+        # alternative, just not what OSIE.pt was trained with.
         teacher_forcing=False,
  
         # "real" uses actual per-frame delta_t (1/fps) -- matches

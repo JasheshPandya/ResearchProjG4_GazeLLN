@@ -1,4 +1,7 @@
 import os
+import sys
+from pathlib import Path
+
 import torch
 import numpy as np
 import pandas as pd
@@ -9,11 +12,7 @@ from tqdm import tqdm
 import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter
 
-# Assuming modeldata is in the same directory
-try:
-    from modeldata import KLDTWLoss, GazeLLNArch
-except ImportError:
-    pass # Needs to be imported or run from within the same directory context
+from OSIE_Modeldata import KLDTWLoss
 
 def _gaussian_heatmap(x, y, img_w, img_h, hmap_w, hmap_h, sigma=1.5):
     hmap = np.zeros((hmap_h, hmap_w), dtype=np.float32)
@@ -238,7 +237,10 @@ def eval_epoch_with_metrics(model, loader, criterion, device):
 
             B, T, hmap_H, hmap_W = hmap_seq.shape
 
-            vis_features = model.extract_features(imgs)
+            has_extract = hasattr(model, 'extract_features')
+            if has_extract:
+                vis_features = model.extract_features(imgs)
+            
             prev_hmap = _center_gaussian(B, hmap_H, hmap_W, device=device, sigma=1.5)
             hx = None
 
@@ -247,7 +249,12 @@ def eval_epoch_with_metrics(model, loader, criterion, device):
 
             for t in range(T):
                 ts = dt_seq[:, t].view(-1, 1)
-                out_hmap, hx = model(vis_features, prev_hmap, hx, ts)
+                
+                if has_extract:
+                    out_hmap, hx = model(vis_features, prev_hmap, hx, ts)
+                else:
+                    out_hmap, hx = model(imgs, prev_hmap, hx, ts)
+                
                 predictions.append(out_hmap.squeeze(1))
                 prev_hmap = out_hmap
                 
@@ -293,10 +300,34 @@ def eval_epoch_with_metrics(model, loader, criterion, device):
 if __name__ == "__main__":
     print("Starting MIT Dataset Evaluation...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    current_dir = Path(__file__).resolve().parent
+    file_path = current_dir / "OSIE_model.pt"
+
+    # To get the metric values from the Finetuned Model
+    # file_path = current_dir / "DIEM" / "DIEM_model.pt"
+
+    if not file_path.exists():
+        print(f"Error: Could not find file at {file_path}")
+        sys.exit(1)
     
-    # Initialize the model and load weights
+    # Load state dict first to detect which architecture was used
+    state_dict = torch.load(file_path, map_location=device)
+    
+    # Detect architecture from actual state dict keys, not filename.
+    # DIEM arch has coordconv_in + coordconv_out; OSIE arch has a single coordconv.
+    has_diem_keys = any("coordconv_in" in k for k in state_dict.keys())
+    
+    if has_diem_keys:
+        print("Detected DIEM architecture weights (coordconv_in/coordconv_out).")
+        from DIEM.DIEM_Modeldata import GazeLLNArch
+    else:
+        print("Detected OSIE architecture weights (single coordconv).")
+        from OSIE_Modeldata import GazeLLNArch
+
     model = GazeLLNArch().to(device)
-    model.load_state_dict(torch.load("best_model.pt", map_location=device))
+    model.load_state_dict(state_dict)
+    print(f"Model loaded successfully from {file_path}")
     
     # Build dataloader
     # The dataset root is the mit_lowres_highres_only folder

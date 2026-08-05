@@ -477,7 +477,7 @@ Usage:
         epochs       = 100,
         lr           = 0.0001,
         patience     = 20,
-        checkpoint   = "best_model.pt",
+        checkpoint   = "OSIE_Model.pt",
     )
 """
 
@@ -616,7 +616,7 @@ def train(
     lr:          float = 0.0001,
     patience:    int   = 20,
     gamma:       float = 0.1,
-    checkpoint:  str   = "best_model.pt",
+    checkpoint:  str   = "OSIE_Model.pt",
 ):
     """
     Full training loop with Adam optimiser, KL-DTW loss, and early stopping.
@@ -683,7 +683,7 @@ def train(
 # convenience: load best weights and run on test set
 # ---------------------------------------------------------------------------
 
-def evaluate_test(model, test_loader, device="cuda", checkpoint="best_model.pt"):
+def evaluate_test(model, test_loader, device="cuda", checkpoint="OSIE_Model.pt"):
     """
     Loads the best saved weights and evaluates on the test set.
 
@@ -711,7 +711,7 @@ def evaluate_test(model, test_loader, device="cuda", checkpoint="best_model.pt")
     #     epochs       = 100,
     #     lr           = 0.0001,
     #     patience     = 20,
-    #     checkpoint   = "best_model.pt",
+    #     checkpoint   = "OSIE_Model.pt",
     # )
 
     # evaluate_test(model, test_loader, device=device)
