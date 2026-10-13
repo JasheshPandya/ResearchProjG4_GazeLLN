@@ -5,6 +5,7 @@ ncps
 tqdm
 matplotlib
 numpy
+scipy
 pandas
 Levenshtein
 fastdtw

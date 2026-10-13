@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import tempfile
 from pathlib import Path
 
 import matplotlib
@@ -95,7 +96,7 @@ def inspect_one_video(video_name: str, n_frames: int, mode_override: str = None)
     max_frame = max((fx["end_frame"] for fxs in subjects.values() for fx in fxs), default=0)
     sample_frames = np.linspace(1, max_frame, n_frames, dtype=int)
 
-    out_dir = Path("/tmp/calibration_debug") / video_name
+    out_dir = Path(tempfile.gettempdir()) / "calibration_debug" / video_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for f_idx in sample_frames:

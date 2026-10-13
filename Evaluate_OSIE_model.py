@@ -336,7 +336,7 @@ if __name__ == "__main__":
     
     # Build dataloader
     # The dataset root is the mit_lowres_highres_only folder
-    data_root = "mit_lowres_highres_only"
+    data_root = str(current_dir / "mit_lowres_highres_only")
     loader = build_mit_dataloader(data_root, batch_size=8, num_workers=0) # using num_workers=0 to avoid windows multiprocessing issues
     
     # Define criterion

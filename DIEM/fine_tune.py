@@ -328,15 +328,14 @@ def fine_tune(
 
 
 if __name__ == "__main__":
-    from modeldata import GazeLLNArch  # your actual model file -- keep
-    # modeldata.py in this same folder, nothing to copy/paste
+    from DIEM_Modeldata import GazeLLNArch
  
     # -----------------------------------------------------------------------
     # Edit these directly to configure a run -- no command-line flags.
     # -----------------------------------------------------------------------
     RUN_CONFIG = dict(
-        pretrained_checkpoint="OSIE.pt",   # your OSIE-trained checkpoint to fine-tune from; None to train from scratch
-        checkpoint="DIEM_model.pt",  # where the best fine-tuned checkpoint gets saved
+        pretrained_checkpoint=str(cfg.WORK_DIR / "OSIE_model.pt"),
+        checkpoint=str(cfg.WORK_DIR / "DIEM_model.pt"),
         epochs=100,
         backbone_lr=1e-6,
         head_lr=1e-4,
@@ -407,4 +406,3 @@ if __name__ == "__main__":
         checkpoint=RUN_CONFIG["checkpoint"],
         use_amp=RUN_CONFIG["use_amp"],
     )
- 

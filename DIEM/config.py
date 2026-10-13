@@ -10,16 +10,19 @@ inside a video folder (e.g. it might be "*.txt", "event_data/*.txt", etc.).
 """
 
 from pathlib import Path
+import os
+
+WORK_DIR = Path(__file__).resolve().parent
 
 # Root folder containing one subdirectory per DIEM video after extraction.
 # Confirmed real layout (from 50_people_brooklyn_no_voices_1280x720.7z):
 #   <DIEM_ROOT>/<video_name>/event_data/*.txt   (one file per subject)
 #   <DIEM_ROOT>/<video_name>/video/*.mp4
 #   <DIEM_ROOT>/<video_name>/audio/*.wav        (not used here)
-DIEM_ROOT = Path("DIEM_ROOT")
+DIEM_ROOT = Path(os.environ.get("DIEM_ROOT", WORK_DIR / "DIEM_ROOT")).expanduser().resolve()
 
 # Where processed (parsed fixations, heatmaps, extracted frames) get written.
-OUTPUT_ROOT = Path("DIEM_Processed")
+OUTPUT_ROOT = Path(os.environ.get("DIEM_OUTPUT_ROOT", WORK_DIR / "DIEM_Processed")).expanduser().resolve()
 
 # Glob (relative to each video's folder) matching one file per subject.
 GAZE_FILE_GLOB = "event_data/*.txt"
