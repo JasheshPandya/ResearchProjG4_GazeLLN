@@ -1,0 +1,12 @@
+opencv-python
+torch
+torchvision
+ncps
+tqdm
+matplotlib
+numpy
+pandas
+Levenshtein
+fastdtw
+similaritymeasures
+pytorch_lightning

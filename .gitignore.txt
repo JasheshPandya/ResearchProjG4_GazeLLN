@@ -18,3 +18,5 @@ DIEM/DIEM_ROOT/
 # Encoder/ Ablation studies
 Encoder/empty_qp_dir/
 Encoder/qp_dir/
+
+venv/

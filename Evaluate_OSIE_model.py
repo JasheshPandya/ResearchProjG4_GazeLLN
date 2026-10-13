@@ -292,7 +292,12 @@ def eval_epoch_with_metrics(model, loader, criterion, device):
 
         print("\nEvaluation Metrics:")
         for k, v in all_metrics.items():
-            avg_val = sum(v) / len(v) if len(v) > 0 else 0
+            if k == "TDE":
+                # Paths shorter than the embedding dimension have no TDE score.
+                v = [value for value in v if np.isfinite(value)]
+                avg_val = sum(v) / len(v) if v else float('nan')
+            else:
+                avg_val = sum(v) / len(v) if len(v) > 0 else 0
             print(f"{k}: {avg_val:.4f}")
             
         return total_loss / len(loader)
