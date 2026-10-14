@@ -1,7 +1,7 @@
 """
 Fine-tuning loop for GazeLLNArch on continuous video (DIEM), building on
 dataset.py's rolling-window Dataset -- rewritten against the ACTUAL model in
-modeldata.py and the real training conventions in trainGazeLNN.ipynb (which
+modeldata.py and the real training conventions in trainGazeLNN.py (which
 produced OSIE_model.pt), not an earlier draft. Concretely, this version
 matches (and was verified against, see the chat writeup) the following:
 
@@ -10,14 +10,14 @@ matches (and was verified against, see the chat writeup) the following:
   2. The model's output is ALREADY softmax-normalized internally (each
      sample sums to 1) and has a channel dim: (B, 1, Hg, Wg).
   3. hx=None and ts of shape (B,) are handled INSIDE forward() now.
-  4. Training in trainGazeLNN.ipynb is FREE-RUNNING / autoregressive, not
+  4. Training in trainGazeLNN.py is FREE-RUNNING / autoregressive, not
      teacher-forced: prev_hmap for step t+1 is the model's own prediction
      from step t (detached during training). Kept as the default here, with
      an opt-in teacher_forcing=True mode available.
   5. The autoregressive prior (prev_hmap before the first real prediction)
      is a small Gaussian centered on the heatmap grid (sigma=1.5) -- see
-     _center_gaussian() below, ported directly from trainGazeLNN.ipynb.
-  6. train_epoch/eval_epoch in trainGazeLNN.ipynb wrap `extract_features` in
+     _center_gaussian() below, ported directly from trainGazeLNN.py.
+  6. train_epoch/eval_epoch in trainGazeLNN.py wrap `extract_features` in
      torch.no_grad() UNCONDITIONALLY -- the backbone is never updated
      through their entire OSIE run. Matched here via train_backbone=False
      by default.
@@ -48,8 +48,21 @@ import torch.optim as optim
 from scipy.ndimage import gaussian_filter
 from torch.utils.data import DataLoader
 
-import config as cfg
-from dataset import build_datasets, VideoOrderedBatchSampler
+from pathlib import Path
+import sys
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+if __package__:
+    from . import config as cfg
+    from .dataset import build_datasets, VideoOrderedBatchSampler
+else:
+    import config as cfg
+    from dataset import build_datasets, VideoOrderedBatchSampler
+from gaze_model import GazeLLNArch, load_model_weights
+from project_paths import OSIE_CHECKPOINT, DIEM_CHECKPOINT
 
 
 def _gaussian_heatmap(x, y, img_w, img_h, hmap_w, hmap_h, sigma=1.5):
@@ -68,7 +81,7 @@ def _gaussian_heatmap(x, y, img_w, img_h, hmap_w, hmap_h, sigma=1.5):
 
 def _center_gaussian(batch_size, hmap_h, hmap_w, device, sigma=1.5):
     """Gaussian blob at the heatmap center. Shape: (B, 1, hmap_h, hmap_w).
-    Ported from trainGazeLNN.ipynb so the fine-tuning prior matches what
+    Ported from trainGazeLNN.py so the fine-tuning prior matches what
     OSIE.pt was actually trained with."""
     hmap = _gaussian_heatmap(
         x=hmap_w / 2, y=hmap_h / 2,
@@ -230,7 +243,7 @@ def eval_epoch(model, loader, criterion, device, scaler=None, ts_mode="real", te
                 if not valid.any():
                     continue
                 loss = criterion(predictions, targets, valid)
-                
+
             total_loss += loss.item()
             n_batches += 1
 
@@ -254,18 +267,15 @@ def fine_tune(
     train_backbone: bool = False,
     unfreeze_backbone_after_epoch: Optional[int] = None,
     pretrained_checkpoint: Optional[str] = None,
-    checkpoint: str = "DIEM_model.pt",
+    checkpoint: str = DIEM_CHECKPOINT,
     use_amp: bool = True,
 ):
     if pretrained_checkpoint is not None:
-        state_dict = torch.load(pretrained_checkpoint, map_location=device)
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        load_model_weights(model, pretrained_checkpoint, device)
         print(f"Loaded pretrained checkpoint {pretrained_checkpoint}")
-        if missing:
-            print(f"  [WARN] missing keys (left at current init): {missing}")
-        if unexpected:
-            print(f"  [WARN] unexpected keys (ignored): {unexpected}")
 
+    checkpoint = Path(checkpoint).expanduser().resolve()
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
     model = model.to(device)
     criterion = ContinuousKLLoss()
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp and device == "cuda")
@@ -328,19 +338,18 @@ def fine_tune(
 
 
 if __name__ == "__main__":
-    from DIEM_Modeldata import GazeLLNArch
- 
+
     # -----------------------------------------------------------------------
     # Edit these directly to configure a run -- no command-line flags.
     # -----------------------------------------------------------------------
     RUN_CONFIG = dict(
-        pretrained_checkpoint=str(cfg.WORK_DIR / "OSIE_model.pt"),
-        checkpoint=str(cfg.WORK_DIR / "DIEM_model.pt"),
+        pretrained_checkpoint=str(OSIE_CHECKPOINT),
+        checkpoint=str(DIEM_CHECKPOINT),
         epochs=100,
         backbone_lr=1e-6,
         head_lr=1e-4,
         patience=20,
- 
+
         # False (default) matches how OSIE.pt was actually trained --
         # the backbone stayed frozen for its entire OSIE run. Set True to
         # let it adapt to video frames instead.
@@ -350,47 +359,48 @@ if __name__ == "__main__":
         # many epochs. None = no schedule, just use train_backbone as-is
         # for the whole run.
         unfreeze_backbone_after_epoch=None,
- 
-        # False (default) matches trainGazeLNN.ipynb's free-running
+
+        # False (default) matches trainGazeLNN.py's free-running
         # autoregressive training (prev_hmap = model's own last prediction).
         # True uses ground-truth teacher forcing instead -- a legitimate
         # alternative, just not what OSIE.pt was trained with.
         teacher_forcing=False,
- 
+
         # "real" uses actual per-frame delta_t (1/fps) -- matches
-        # trainGazeLNN.ipynb's current dt_seq usage. "constant_one" instead
+        # trainGazeLNN.py's current dt_seq usage. "constant_one" instead
         # fixes ts=1.0 for every step.
         ts_mode="real",
- 
+
         videos_per_batch=8,
         device="cuda" if torch.cuda.is_available() else "cpu",
         use_amp=True,
         num_workers=4,
     )
     # -----------------------------------------------------------------------
- 
+
     if RUN_CONFIG["device"] == "cuda":
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
     train_ds, val_ds, test_ds = build_datasets()
- 
+
     train_loader = DataLoader(
-        train_ds, 
+        train_ds,
         batch_sampler=VideoOrderedBatchSampler(train_ds, videos_per_batch=RUN_CONFIG["videos_per_batch"]),
         num_workers=RUN_CONFIG["num_workers"],
         pin_memory=(RUN_CONFIG["device"] == "cuda")
     )
     val_loader = DataLoader(
-        val_ds, 
+        val_ds,
         batch_sampler=VideoOrderedBatchSampler(val_ds, videos_per_batch=RUN_CONFIG["videos_per_batch"], shuffle_videos=False),
         num_workers=RUN_CONFIG["num_workers"],
         pin_memory=(RUN_CONFIG["device"] == "cuda")
     )
- 
-    model = GazeLLNArch(image_h=cfg.MODEL_INPUT_HEIGHT, image_w=cfg.MODEL_INPUT_WIDTH, S=cfg.S)
- 
+
+    model = GazeLLNArch(image_h=cfg.MODEL_INPUT_HEIGHT, image_w=cfg.MODEL_INPUT_WIDTH, S=cfg.S,
+                        pretrained_backbone=RUN_CONFIG["pretrained_checkpoint"] is None)
+
     history = fine_tune(
         model, train_loader, val_loader,
         device=RUN_CONFIG["device"],

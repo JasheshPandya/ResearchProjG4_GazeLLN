@@ -1,0 +1,23 @@
+# Ignore all video files and images
+*.mp4
+*.png
+*.pdf
+
+# Python cache
+__pycache__/
+.vscode/
+*.pyc
+
+# MIT LowRes Dataset for evaluation
+mit_lowres_highres_only/
+
+# Diem Dataset
+DIEM/DIEM_Processed/
+DIEM/DIEM_ROOT/
+
+# Encoder/ Ablation studies
+Encoder/empty_qp_dir/
+Encoder/qp_dir/
+Encoder/ablation_out/eval_results/vmaf_logs
+
+venv/

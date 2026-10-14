@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -57,6 +58,113 @@ static int parse_arguments(int argc, char **argv, EncoderConfig *cfg) {
     return 0;
 }
 
+typedef struct {
+    const EncoderConfig *config;
+    AVCodecContext *decoder;
+    struct SwsContext *scaler;
+    x264_t *encoder;
+    AVFormatContext *output;
+    AVStream *stream;
+    AVRational time_base;
+    int num_mbs;
+    int frames_read;
+    int frames_written;
+} EncodingState;
+
+// Used for both ordinary input frames and the x264 end-of-stream drain.
+static int encode_picture(EncodingState *state, x264_picture_t *input) {
+    x264_picture_t output;
+    x264_nal_t *nals;
+    int num_nals;
+    int size = x264_encoder_encode(state->encoder, &nals, &num_nals, input, &output);
+    if (size < 0) return AVERROR_EXTERNAL;
+    if (size == 0) return 0;
+
+    AVPacket *packet = av_packet_alloc();
+    if (!packet) return AVERROR(ENOMEM);
+    int ret = av_new_packet(packet, size);
+    if (ret >= 0) {
+        memcpy(packet->data, nals[0].p_payload, size);
+        packet->pts = output.i_pts;
+        packet->dts = output.i_dts;
+        // Every encoded frame spans one frame-rate tick. A zero duration
+        // makes the MP4 duration/rate wrong, especially with reordered frames.
+        packet->duration = 1;
+        packet->stream_index = state->stream->index;
+        if (output.b_keyframe) packet->flags |= AV_PKT_FLAG_KEY;
+        av_packet_rescale_ts(packet, state->time_base, state->stream->time_base);
+        ret = av_interleaved_write_frame(state->output, packet);
+        if (ret >= 0) state->frames_written++;
+    }
+    av_packet_free(&packet);
+    return ret;
+}
+
+static int process_frame(EncodingState *state, AVFrame *frame) {
+    x264_picture_t picture;
+    x264_picture_init(&picture);
+    if (x264_picture_alloc(&picture, X264_CSP_I420,
+                           state->decoder->width, state->decoder->height) < 0)
+        return AVERROR(ENOMEM);
+    int ret = sws_scale(state->scaler, (const uint8_t * const *)frame->data,
+                        frame->linesize, 0, state->decoder->height,
+                        picture.img.plane, picture.img.i_stride);
+    if (ret != state->decoder->height) {
+        x264_picture_clean(&picture);
+        return ret < 0 ? ret : AVERROR_EXTERNAL;
+    }
+    picture.i_pts = state->frames_read;
+    float *offsets = calloc(state->num_mbs, sizeof(float));
+    if (!offsets) {
+        x264_picture_clean(&picture);
+        return AVERROR(ENOMEM);
+    }
+    char path[4096];
+    int length = snprintf(path, sizeof(path), "%s/qpoffset_%06d.bin",
+                          state->config->qpoffset_dir, state->frames_read);
+    if (length < 0 || length >= (int)sizeof(path)) {
+        free(offsets);
+        x264_picture_clean(&picture);
+        return AVERROR(ENAMETOOLONG);
+    }
+    FILE *file = fopen(path, "rb");
+    if (file) {
+        size_t count = fread(offsets, sizeof(float), state->num_mbs, file);
+        fclose(file);
+        if (count != (size_t)state->num_mbs) {
+            fprintf(stderr, "Warning: Incomplete QP offsets in %s. Using zeros.\n", path);
+            memset(offsets, 0, state->num_mbs * sizeof(float));
+        }
+    } else if (state->frames_read < 10) {
+        fprintf(stderr, "Warning: Could not open %s. Using zero QP offsets.\n", path);
+    } else if (state->frames_read == 10) {
+        fprintf(stderr, "Warning: Silencing further missing QP offset warnings.\n");
+    }
+    picture.prop.quant_offsets = offsets;
+    picture.prop.quant_offsets_free = free;
+    ret = encode_picture(state, &picture);
+    x264_picture_clean(&picture);
+    if (ret >= 0) {
+        state->frames_read++;
+        if (state->frames_read % 100 == 0)
+            printf("Processed %d frames...\n", state->frames_read);
+    }
+    return ret;
+}
+
+// Drain decoded frames through exactly the same processing/QP path at EOF.
+static int receive_frames(EncodingState *state, AVFrame *frame, int draining) {
+    for (;;) {
+        int ret = avcodec_receive_frame(state->decoder, frame);
+        if (ret == AVERROR_EOF) return 0;
+        if (ret == AVERROR(EAGAIN)) return draining ? ret : 0;
+        if (ret < 0) return ret;
+        ret = process_frame(state, frame);
+        av_frame_unref(frame);
+        if (ret < 0) return ret;
+    }
+}
+
 int main(int argc, char **argv) {
     EncoderConfig cfg;
     if (parse_arguments(argc, argv, &cfg) < 0) {
@@ -79,6 +187,9 @@ int main(int argc, char **argv) {
     struct SwsContext *sws_ctx = NULL;
 
     int ret = 0;
+    int exit_code = 1;
+    AVPacket *in_pkt = NULL;
+    AVFrame *dec_frame = NULL;
 
     // 1. Open input video
     if ((ret = avformat_open_input(&in_fmt_ctx, cfg.input_video, NULL, NULL)) < 0) {
@@ -197,6 +308,7 @@ int main(int argc, char **argv) {
     out_video_stream->codecpar->width = dec_ctx->width;
     out_video_stream->codecpar->height = dec_ctx->height;
     out_video_stream->time_base = (AVRational){fps.den, fps.num};
+    out_video_stream->avg_frame_rate = fps;
 
     // Extract H.264 headers (SPS/PPS) from x264 and set as codec extradata for MP4 container compliance
     x264_nal_t *headers;
@@ -234,6 +346,7 @@ int main(int argc, char **argv) {
             goto cleanup_all;
         }
         out_audio_stream->codecpar->codec_tag = 0; // Let FFmpeg choose appropriate tag
+        out_audio_stream->time_base = in_fmt_ctx->streams[audio_stream_idx]->time_base;
         printf("Audio stream found and copy configured.\n");
     }
 
@@ -266,160 +379,73 @@ int main(int argc, char **argv) {
     int num_mbs_per_frame = mb_width * mb_height;
     printf("Grid size: %dx%d Macroblocks (%d MBs per frame)\n", mb_width, mb_height, num_mbs_per_frame);
 
-    // 4. Processing Loop
-    AVPacket *in_pkt = av_packet_alloc();
-    AVFrame *dec_frame = av_frame_alloc();
+    // 4. Decode packets, drain the decoder, then drain x264.
+    in_pkt = av_packet_alloc();
+    dec_frame = av_frame_alloc();
     if (!in_pkt || !dec_frame) {
         fprintf(stderr, "Error: Failed to allocate packet or frame structures.\n");
-        if (in_pkt) av_packet_free(&in_pkt);
-        if (dec_frame) av_frame_free(&dec_frame);
+        goto cleanup_all;
+    }
+    EncodingState state = {
+        .config = &cfg, .decoder = dec_ctx, .scaler = sws_ctx,
+        .encoder = x264_encoder, .output = out_fmt_ctx,
+        .stream = out_video_stream, .time_base = {fps.den, fps.num},
+        .num_mbs = num_mbs_per_frame,
+    };
+    printf("Starting encoding loop...\n");
+    while ((ret = av_read_frame(in_fmt_ctx, in_pkt)) >= 0) {
+        if (in_pkt->stream_index == video_stream_idx) {
+            ret = avcodec_send_packet(dec_ctx, in_pkt);
+            if (ret >= 0) ret = receive_frames(&state, dec_frame, 0);
+        } else if (in_pkt->stream_index == audio_stream_idx) {
+            av_packet_rescale_ts(in_pkt, in_fmt_ctx->streams[audio_stream_idx]->time_base,
+                                 out_audio_stream->time_base);
+            in_pkt->stream_index = out_audio_stream->index;
+            ret = av_interleaved_write_frame(out_fmt_ctx, in_pkt);
+        }
+        av_packet_unref(in_pkt);
+        if (ret < 0) {
+            fprintf(stderr, "Error processing input packet: %d\n", ret);
+            goto cleanup_all;
+        }
+    }
+    if (ret != AVERROR_EOF) {
+        fprintf(stderr, "Error reading input: %d\n", ret);
         goto cleanup_all;
     }
 
-    int video_frame_count = 0;
-    int encoded_frame_count = 0;
-
-    printf("Starting encoding loop...\n");
-
-    while (av_read_frame(in_fmt_ctx, in_pkt) >= 0) {
-        if (in_pkt->stream_index == video_stream_idx) {
-            // Decode video packet
-            ret = avcodec_send_packet(dec_ctx, in_pkt);
-            if (ret < 0) {
-                fprintf(stderr, "Error sending packet for decoding: %d\n", ret);
-                av_packet_unref(in_pkt);
-                break;
-            }
-
-            while (ret >= 0) {
-                ret = avcodec_receive_frame(dec_ctx, dec_frame);
-                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                    break;
-                } else if (ret < 0) {
-                    fprintf(stderr, "Error during decoding: %d\n", ret);
-                    break;
-                }
-
-                // Process decoded frame
-                x264_picture_t pic_in;
-                x264_picture_t pic_out;
-                x264_picture_init(&pic_in);
-
-                // Allocate image planes in pic_in
-                x264_picture_alloc(&pic_in, X264_CSP_I420, dec_ctx->width, dec_ctx->height);
-
-                // Scale frame to YUV420P directly into pic_in planes
-                sws_scale(sws_ctx, (const uint8_t * const *)dec_frame->data, dec_frame->linesize,
-                          0, dec_ctx->height, pic_in.img.plane, pic_in.img.i_stride);
-
-                pic_in.i_pts = video_frame_count;
-
-                // Load QP offsets for this frame
-                float *qp_offsets = malloc(num_mbs_per_frame * sizeof(float));
-                if (!qp_offsets) {
-                    fprintf(stderr, "Error: Could not allocate memory for QP offsets.\n");
-                    x264_picture_clean(&pic_in);
-                    break;
-                }
-
-                char qp_path[1024];
-                snprintf(qp_path, sizeof(qp_path), "%s/qpoffset_%06d.bin", cfg.qpoffset_dir, video_frame_count);
-                FILE *qp_file = fopen(qp_path, "rb");
-                if (qp_file) {
-                    size_t read_floats = fread(qp_offsets, sizeof(float), num_mbs_per_frame, qp_file);
-                    fclose(qp_file);
-                    if (read_floats != num_mbs_per_frame) {
-                        fprintf(stderr, "Warning: Only read %zu/%d QP offsets from %s. Using zeros.\n",
-                                read_floats, num_mbs_per_frame, qp_path);
-                        memset(qp_offsets, 0, num_mbs_per_frame * sizeof(float));
-                    }
-                } else {
-                    if (video_frame_count < 10) {
-                        fprintf(stderr, "Warning: Could not open %s. Using zero QP offsets.\n", qp_path);
-                    } else if (video_frame_count == 10) {
-                        fprintf(stderr, "Warning: Silencing further missing QP offset file warnings.\n");
-                    }
-                    memset(qp_offsets, 0, num_mbs_per_frame * sizeof(float));
-                }
-
-                // Pass the QP offsets to the x264 structure
-                pic_in.prop.quant_offsets = qp_offsets;
-                pic_in.prop.quant_offsets_free = free; // Automatically freed by x264 when done
-
-                // Encode H.264 frame
-                x264_nal_t *nals;
-                int i_nals;
-                int frame_size = x264_encoder_encode(x264_encoder, &nals, &i_nals, &pic_in, &pic_out);
-                if (frame_size > 0) {
-                    // Create packet for output muxer
-                    AVPacket *out_pkt = av_packet_alloc();
-                    av_new_packet(out_pkt, frame_size);
-                    memcpy(out_pkt->data, nals[0].p_payload, frame_size);
-
-                    out_pkt->pts = pic_out.i_pts;
-                    out_pkt->dts = pic_out.i_dts;
-                    out_pkt->stream_index = out_video_stream->index;
-
-                    // Rescale timestamps from x264 timebase to output stream timebase
-                    AVRational x264_tb = {fps.den, fps.num};
-                    av_packet_rescale_ts(out_pkt, x264_tb, out_video_stream->time_base);
-
-                    av_interleaved_write_frame(out_fmt_ctx, out_pkt);
-                    av_packet_free(&out_pkt);
-                    encoded_frame_count++;
-                }
-
-                // Clean x264 input picture memory
-                x264_picture_clean(&pic_in);
-                video_frame_count++;
-
-                if (video_frame_count % 100 == 0) {
-                    printf("Processed %d frames...\n", video_frame_count);
-                }
-            }
-        } else if (in_pkt->stream_index == audio_stream_idx) {
-            // Passthrough audio packet directly
-            av_packet_rescale_ts(in_pkt, in_fmt_ctx->streams[audio_stream_idx]->time_base, out_audio_stream->time_base);
-            in_pkt->stream_index = out_audio_stream->index;
-            av_interleaved_write_frame(out_fmt_ctx, in_pkt);
-        }
-        av_packet_unref(in_pkt);
+    printf("Draining decoder delay...\n");
+    ret = avcodec_send_packet(dec_ctx, NULL);
+    if (ret >= 0) ret = receive_frames(&state, dec_frame, 1);
+    if (ret < 0) {
+        fprintf(stderr, "Error draining decoder: %d\n", ret);
+        goto cleanup_all;
     }
-
-    // 5. Flush x264 encoder
     printf("Flushing encoder delay...\n");
     while (x264_encoder_delayed_frames(x264_encoder) > 0) {
-        x264_picture_t pic_out;
-        x264_nal_t *nals;
-        int i_nals;
-        int frame_size = x264_encoder_encode(x264_encoder, &nals, &i_nals, NULL, &pic_out);
-        if (frame_size > 0) {
-            AVPacket *out_pkt = av_packet_alloc();
-            av_new_packet(out_pkt, frame_size);
-            memcpy(out_pkt->data, nals[0].p_payload, frame_size);
-
-            out_pkt->pts = pic_out.i_pts;
-            out_pkt->dts = pic_out.i_dts;
-            out_pkt->stream_index = out_video_stream->index;
-
-            AVRational x264_tb = {fps.den, fps.num};
-            av_packet_rescale_ts(out_pkt, x264_tb, out_video_stream->time_base);
-
-            av_interleaved_write_frame(out_fmt_ctx, out_pkt);
-            av_packet_free(&out_pkt);
-            encoded_frame_count++;
-        } else if (frame_size < 0) {
-            break;
+        ret = encode_picture(&state, NULL);
+        if (ret < 0) {
+            fprintf(stderr, "Error draining encoder: %d\n", ret);
+            goto cleanup_all;
         }
     }
-
-    av_write_trailer(out_fmt_ctx);
-    printf("Encoding complete! Total video frames read: %d, written: %d\n", video_frame_count, encoded_frame_count);
-
-    av_packet_free(&in_pkt);
-    av_frame_free(&dec_frame);
+    if (!state.frames_read || state.frames_read != state.frames_written) {
+        fprintf(stderr, "Error: Read %d frames but wrote %d.\n",
+                state.frames_read, state.frames_written);
+        goto cleanup_all;
+    }
+    ret = av_write_trailer(out_fmt_ctx);
+    if (ret < 0) {
+        fprintf(stderr, "Error writing output trailer: %d\n", ret);
+        goto cleanup_all;
+    }
+    printf("Encoding complete! Total video frames read: %d, written: %d\n",
+            state.frames_read, state.frames_written);
+    exit_code = 0;
 
 cleanup_all:
+    av_packet_free(&in_pkt);
+    av_frame_free(&dec_frame);
     if (sws_ctx) sws_freeContext(sws_ctx);
     if (x264_encoder) x264_encoder_close(x264_encoder);
     if (dec_ctx) avcodec_free_context(&dec_ctx);
@@ -432,5 +458,5 @@ cleanup_all:
         avformat_free_context(out_fmt_ctx);
     }
 
-    return 0;
+    return exit_code;
 }

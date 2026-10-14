@@ -1,0 +1,7 @@
+__pycache__/
+diem_processed/
+gaze_results/
+gaze_smoke_results/
+compression_results/
+compression_smoke_results/
+qp_gaze/

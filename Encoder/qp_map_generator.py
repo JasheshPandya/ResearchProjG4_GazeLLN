@@ -13,9 +13,10 @@ import cv2
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
-    sys.path.append(str(ROOT_DIR / "DIEM"))
+    sys.path.insert(0, str(ROOT_DIR))
 
-from DIEM_Modeldata import GazeLLNArch
+from gaze_model import GazeLLNArch, load_gaze_model
+from project_paths import DIEM_CHECKPOINT
 
 def mb_grid(native_width = 1920, native_height = 1080):
     """
@@ -63,8 +64,8 @@ def call_model(frame: np.ndarray, checkpoint_path: str = None, dt: float = 1) ->
 
     Args:
         frame: 3D numpy array [H, W, C] representing the raw video frame (BGR order from OpenCV).
-        dt: The time delta between the current frame and the previous frame. 
-        
+        dt: The time delta between the current frame and the previous frame.
+
     Returns:
         hmap: 3D torch.Tensor [1, mb_height: 32, mb_width: 48] representing the saliency map.
     """
@@ -73,24 +74,11 @@ def call_model(frame: np.ndarray, checkpoint_path: str = None, dt: float = 1) ->
     if _MODEL_CACHE["model"] is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         _MODEL_CACHE["device"] = device
-        
-        model = GazeLLNArch().to(device)
-        
-        # Determine path to DIEM_model.pt
 
-        if checkpoint_path is None:
-            ckpt_file = ROOT_DIR / "DIEM_model.pt"
-        else:
-            ckpt_file = Path(checkpoint_path)
+        ckpt_file = Path(checkpoint_path).expanduser().resolve() if checkpoint_path is not None else DIEM_CHECKPOINT
+        print(f"Loading model weights from {ckpt_file}")
+        model = load_gaze_model(ckpt_file, device)
 
-        # Load state_dict weights
-        if ckpt_file.exists():
-            print(f"Loading model weights from {ckpt_file}")
-            state_dict = torch.load(ckpt_file, map_location=device)
-            model.load_state_dict(state_dict)
-        else:
-            print(f"Warning: {ckpt_file} not found. Running with un-trained weights.")
-            
         model.eval()
         _MODEL_CACHE["model"] = model
         _MODEL_CACHE["prev_hmap"] = _init_center_gaussian().to(device)
@@ -127,12 +115,12 @@ def apply_spatial_smoothing(hmap: torch.Tensor, sigma = 0.0) -> torch.Tensor:
     if sigma <= 0.0:
         print("No guassian smoothing applied")
         return hmap
-    
+
     hmap_np = hmap.detach().cpu().numpy()
     # Apply smoothing only to the spatial dimensions (last two axes)
     sigmas = [0.0] * (hmap.ndim - 2) + [sigma, sigma]
     smoothed_np = gaussian_filter(hmap_np, sigma=sigmas).astype(np.float32)
-    
+
     return torch.from_numpy(smoothed_np).to(hmap.device)
 
 def normalize_heatmap(hmap, num_mb_width, num_mb_height) -> np.ndarray:
@@ -151,13 +139,13 @@ def normalize_heatmap(hmap, num_mb_width, num_mb_height) -> np.ndarray:
                                                     mode='bilinear',
                                                     align_corners=False)
     # Shape: (B, 1, num_mb_height, num_mb_width) Ensure B = 1
-    
+
     hmap_grid = resized_hmap.squeeze(1).squeeze(0)
 
     hmap_min = hmap_grid.min()
     hmap_max = hmap_grid.max()
     hmap_range = hmap_max - hmap_min
-    
+
     if hmap_range > 1e-8:
         normalized_hmap = (hmap_grid - hmap_min) / hmap_range
     else:
@@ -184,13 +172,14 @@ def main(sys_args=None):
         description="Convert video frames to QP offset .bin files using a saliency model.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    
+
     parser.add_argument(
         "--video_path",
         type=Path,
         default=None,
         help="Path to the video file. If specified, heatmaps will be generated frame-by-frame using the model.",
     )
+    parser.add_argument("--checkpoint", type=Path, help="Trained DIEM checkpoint; default: DIEM/DIEM_model.pt (resolved from the project root).")
     parser.add_argument(
         "--output_dir",
         type=Path,
@@ -226,6 +215,8 @@ def main(sys_args=None):
     )
 
     args = parser.parse_args(sys_args)
+    if args.checkpoint is not None and not args.checkpoint.is_file():
+        parser.error(f"Checkpoint not found: {args.checkpoint}")
 
     # Validate arguments
     if args.qp_min >= args.qp_max:
@@ -237,28 +228,28 @@ def main(sys_args=None):
 
     # Discover and load heatmaps
     heatmaps = []
-    
-        
+
+
     cap = cv2.VideoCapture(str(args.video_path))
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video file: {args.video_path}")
-    
+
     native_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     native_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
+
     frame_idx = 0
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        
-        hm = call_model(frame)
-        
+
+        hm = call_model(frame, checkpoint_path=args.checkpoint)
+
         # Append torch.Tensor directly (already torch.float32)
         heatmaps.append(hm)
         frame_idx += 1
-        
+
     cap.release()
     num_frames = len(heatmaps)
     print(f"Generated {num_frames} heatmaps using the model")
@@ -266,7 +257,7 @@ def main(sys_args=None):
     mb_width, mb_height = mb_grid(native_width, native_height)
     print(f"Macroblock grid: {mb_width} x {mb_height} ({mb_width * mb_height} MBs/frame)")
 
-    # Spatial smoothing 
+    # Spatial smoothing
     if args.spatial_sigma > 0:
         print(f"Applying spatial Gaussian smoothing (sigma={args.spatial_sigma})")
         heatmaps = [apply_spatial_smoothing(h, args.spatial_sigma) for h in heatmaps]
@@ -333,7 +324,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         main()
     else:
-        # Fallback default runner behavior 
+        # Fallback default runner behavior
         main([
             "--video_path", "sample_video.mp4",
             "--output_dir", "qp_dir",

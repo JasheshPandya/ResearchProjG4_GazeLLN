@@ -2,61 +2,111 @@
   "roi_percentile": 25,
   "clips": [
     {
-      "name": "Sample_Video",
-      "reference": "..\\Sample_Video.mp4",
-      "roi_source": "..\\qp_dir",
+      "name": "sample_video",
+      "reference": "../sample_video.mp4",
+      "roi_source": "../qp_dir",
       "variants": [
         {
           "method": "uniform",
-          "label": "crf20",
-          "path": "uniform_crf20.mp4",
-          "encode_time_s": 9.31
+          "label": "crf18",
+          "path": "uniform_crf18.mp4",
+          "encode_time_s": 6.606438984003034,
+          "qp_generation_time_s": 0.0,
+          "pipeline_time_s": 6.606438984003034
         },
         {
           "method": "gaze",
-          "label": "crf20",
-          "path": "gaze_crf20.mp4",
-          "qp_dir": "..\\qp_dir",
-          "encode_time_s": 8.66
+          "label": "crf18",
+          "path": "gaze_crf18.mp4",
+          "encode_time_s": 5.606769755999267,
+          "qp_dir": "../qp_dir",
+          "qp_generation_time_s": 11.198575143003836,
+          "pipeline_time_s": 16.805344899003103
         },
         {
           "method": "uniform",
-          "label": "crf23",
-          "path": "uniform_crf23.mp4",
-          "encode_time_s": 8.43
+          "label": "crf21",
+          "path": "uniform_crf21.mp4",
+          "encode_time_s": 5.9190844030017615,
+          "qp_generation_time_s": 0.0,
+          "pipeline_time_s": 5.9190844030017615
         },
         {
           "method": "gaze",
-          "label": "crf23",
-          "path": "gaze_crf23.mp4",
-          "qp_dir": "..\\qp_dir",
-          "encode_time_s": 8.3
+          "label": "crf21",
+          "path": "gaze_crf21.mp4",
+          "encode_time_s": 5.475082503995509,
+          "qp_dir": "../qp_dir",
+          "qp_generation_time_s": 11.198575143003836,
+          "pipeline_time_s": 16.673657646999345
         },
         {
           "method": "uniform",
-          "label": "crf26",
-          "path": "uniform_crf26.mp4",
-          "encode_time_s": 7.94
+          "label": "crf24",
+          "path": "uniform_crf24.mp4",
+          "encode_time_s": 5.48996552600147,
+          "qp_generation_time_s": 0.0,
+          "pipeline_time_s": 5.48996552600147
         },
         {
           "method": "gaze",
-          "label": "crf26",
-          "path": "gaze_crf26.mp4",
-          "qp_dir": "..\\qp_dir",
-          "encode_time_s": 7.39
+          "label": "crf24",
+          "path": "gaze_crf24.mp4",
+          "encode_time_s": 4.653520234998723,
+          "qp_dir": "../qp_dir",
+          "qp_generation_time_s": 11.198575143003836,
+          "pipeline_time_s": 15.85209537800256
         },
         {
           "method": "uniform",
-          "label": "crf29",
-          "path": "uniform_crf29.mp4",
-          "encode_time_s": 7.31
+          "label": "crf27",
+          "path": "uniform_crf27.mp4",
+          "encode_time_s": 4.992928662999475,
+          "qp_generation_time_s": 0.0,
+          "pipeline_time_s": 4.992928662999475
         },
         {
           "method": "gaze",
-          "label": "crf29",
-          "path": "gaze_crf29.mp4",
-          "qp_dir": "..\\qp_dir",
-          "encode_time_s": 7.24
+          "label": "crf27",
+          "path": "gaze_crf27.mp4",
+          "encode_time_s": 4.696259096999711,
+          "qp_dir": "../qp_dir",
+          "qp_generation_time_s": 11.198575143003836,
+          "pipeline_time_s": 15.894834240003547
+        },
+        {
+          "method": "uniform",
+          "label": "crf30",
+          "path": "uniform_crf30.mp4",
+          "encode_time_s": 4.707652884004347,
+          "qp_generation_time_s": 0.0,
+          "pipeline_time_s": 4.707652884004347
+        },
+        {
+          "method": "gaze",
+          "label": "crf30",
+          "path": "gaze_crf30.mp4",
+          "encode_time_s": 5.1033626639982685,
+          "qp_dir": "../qp_dir",
+          "qp_generation_time_s": 11.198575143003836,
+          "pipeline_time_s": 16.301937807002105
+        },
+        {
+          "method": "uniform",
+          "label": "crf33",
+          "path": "uniform_crf33.mp4",
+          "encode_time_s": 4.718675780000922,
+          "qp_generation_time_s": 0.0,
+          "pipeline_time_s": 4.718675780000922
+        },
+        {
+          "method": "gaze",
+          "label": "crf33",
+          "path": "gaze_crf33.mp4",
+          "encode_time_s": 4.592800026002806,
+          "qp_dir": "../qp_dir",
+          "qp_generation_time_s": 11.198575143003836,
+          "pipeline_time_s": 15.791375169006642
         }
       ]
     }

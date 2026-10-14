@@ -1,0 +1,72 @@
+name: Encoder portability
+
+on:
+  push:
+    paths: ["Encoder/**", "Baselines/**", "DIEM/**", "gaze_*.py", "project_paths.py", "OSIE_Modeldata.py", "trainGazeLNN.py", "testMITlowres.py", "mit_data.py", "Evaluate_OSIE_model.py", "test_model.py", "test_metrics.py", "requirements.txt", ".github/workflows/encoder.yml"]
+  pull_request:
+    paths: ["Encoder/**", "Baselines/**", "DIEM/**", "gaze_*.py", "project_paths.py", "OSIE_Modeldata.py", "trainGazeLNN.py", "testMITlowres.py", "mit_data.py", "Evaluate_OSIE_model.py", "test_model.py", "test_metrics.py", "requirements.txt", ".github/workflows/encoder.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      MPLBACKEND: Agg
+      GAZELNN_REQUIRE_NATIVE_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libx264-dev
+      - name: Install macOS libraries
+        if: runner.os == 'macOS'
+        run: brew install pkgconf ffmpeg x264
+      - name: Install Windows toolchain
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-libx264
+      - name: Add Windows native tools to PATH
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: echo "$(cygpath -w "$MINGW_PREFIX/bin")" >> "$GITHUB_PATH"
+      - name: Install evaluation test dependencies
+        run: python -m pip install numpy scipy opencv-python-headless matplotlib
+      - name: Build native encoder
+        run: python Encoder/build.py
+      - name: Run metric, portability and native regression tests
+        run: python -m unittest -v Encoder.test_compression_metrics Encoder.test_compression_plots Encoder.test_portability Encoder.test_encoder
+  model-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MPLBACKEND: Agg
+      OMP_NUM_THREADS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install model and metric dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Test shared CoordConv architecture and baselines without downloading checkpoints
+        run: python -m unittest -v test_model test_metrics Baselines.test_baselines

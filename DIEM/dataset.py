@@ -40,7 +40,10 @@ from typing import List, Tuple
 
 import numpy as np
 
-import config as cfg
+if __package__:
+    from . import config as cfg
+else:
+    import config as cfg
 
 try:
     import torch

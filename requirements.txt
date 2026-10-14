@@ -11,3 +11,5 @@ Levenshtein
 fastdtw
 similaritymeasures
 pytorch_lightning
+Pillow
+imageio

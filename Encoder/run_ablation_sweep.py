@@ -1,174 +1,109 @@
+"""Encode reproducible CRF sweeps with uniform, gaze, center and motion allocation."""
 
-"""
-run_ablation_sweep.py  (drop this into the Encoder/ folder, next to run_pipeline.py)
-
-Ablation-sweep version of run_pipeline.py: instead of one gaze-guided encode
-at CRF 26, this compiles the encoder once, then produces BOTH a uniform and
-a gaze-guided encode at each CRF in CRF_SWEEP, and writes them out in the
-layout evaluate_compression.py's manifest.json expects.
-
-Uniform baseline = encoder.exe pointed at an EMPTY diasrectory. encoder.c
-falls back to all-zero QP offsets when it can't find a frame's .bin file
-(see the fopen()/fread() fallback around line ~330), so this is the exact
-same binary/CRF/preset as the gaze-guided run, just without per-MB offsets.
-No changes to encoder.c needed.
-
-Output layout (under Encoder/):
-    Encoder/
-      qp_dir/                      # one saliency map, reused across CRFs
-      empty_qp_dir/                # empty on purpose -> forces zero offsets
-      ablation_out/
-        uniform_crf20.mp4 ... crf29.mp4
-        gaze_crf20.mp4 ... crf29.mp4
-        manifest.json              # ready to feed straight into evaluate_compression.py
-
-Edit CRF_SWEEP / INPUT_VIDEO / QP params below as needed, then run:
-    python run_ablation_sweep.py
-"""
-
+import argparse
 import json
+import math
 import os
-import shutil
-import subprocess
-import sys
-import time
 from pathlib import Path
+import subprocess
+import tempfile
 
-# --------------------------------------------------------------------------- #
-# Config -- edit these for your test clip / sweep
-# --------------------------------------------------------------------------- #
-
-WORK_DIR = Path(__file__).resolve().parent
-INPUT_VIDEO = WORK_DIR / "Sample_Video.mp4"   # <- point this at your test clip
-print(repr(WORK_DIR))
-print(repr(INPUT_VIDEO))
-print("exists?", INPUT_VIDEO.exists())
-OUT_DIR = WORK_DIR / "ablation_out"
-CRF_SWEEP = [18, 21, 24, 27, 30, 33]   # >=4 points recommended for BD-Rate
-PRESET = "medium"
-
-# qp_map_generator.py settings (same for every CRF -- one saliency pass is
-# enough since the model doesn't depend on CRF; only the encoder call does)
-QP_MIN = -3.0
-QP_MAX = 10.0
-SPATIAL_SIGMA = 1.5
-TEMPORAL_ALPHA = 1.0
+if __package__:
+    from .build import WORK_DIR
+    from .runtime import subprocess_environment
+    from .workflow import encode_video, prepare_qp_maps, select_encoder, validate_qp_maps, video_info
+    from .baseline_qp_generator import generate_maps
+else:
+    from build import WORK_DIR
+    from runtime import subprocess_environment
+    from workflow import encode_video, prepare_qp_maps, select_encoder, validate_qp_maps, video_info
+    from baseline_qp_generator import generate_maps
 
 
-def run_cmd(cmd, env=None):
-    print(f"Running command: {' '.join(str(c) for c in cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env, shell=False)
-    if result.returncode != 0:
-        print("--- STDOUT ---")
-        print(result.stdout)
-        print("--- STDERR ---")
-        print(result.stderr)
-        raise RuntimeError(f"Command failed with exit code {result.returncode}")
-    print("Command executed successfully!")
-    return result
+def relative_path(path, directory):
+    path = Path(path).resolve()
+    try:
+        return Path(os.path.relpath(path, directory)).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
-def main():
-    if not INPUT_VIDEO.exists():
-        print(f"Error: {INPUT_VIDEO} not found.", file=sys.stderr)
-        sys.exit(1)
-
-    env = os.environ.copy()
-    env["PATH"] = "C:\\msys64\\mingw64\\bin;" + env.get("PATH", "")
-
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    qp_dir = WORK_DIR / "qp_dir"
-    empty_qp_dir = WORK_DIR / "empty_qp_dir"
-    empty_qp_dir.mkdir(parents=True, exist_ok=True)
-    # keep it empty every run, in case a previous run left files in it
-    for f in empty_qp_dir.iterdir():
-        f.unlink()
-
-    # 1. Compile the encoder once
-    print("Compiling encoder.c:")
-    gcc_cmd = [
-        "C:\\msys64\\mingw64\\bin\\gcc.exe", "-O3", "-Wall",
-        str(WORK_DIR / "encoder.c"), "-o", str(WORK_DIR / "encoder.exe"),
-        "-lavcodec", "-lavformat", "-lavutil", "-lswscale", "-lx264",
-    ]
-    run_cmd(gcc_cmd, env=env)
-    encoder_exe = WORK_DIR / "encoder.exe"
-
-    # 2. Generate the saliency-driven QP offset maps ONCE for this clip.
-    # Reused for every CRF in the sweep -- the model's output doesn't depend on the encoder's CRF.
-    print("\nGenerating QP offset maps (qp_map_generator.py):")
-    if qp_dir.exists():
-        shutil.rmtree(qp_dir)
-    qp_dir.mkdir(parents=True)
-    run_cmd([
-        sys.executable, "qp_map_generator.py",
-        "--video_path", str(INPUT_VIDEO),
-        "--output_dir", str(qp_dir),
-        "--qp_min", str(QP_MIN),
-        "--qp_max", str(QP_MAX),
-        "--spatial_sigma", str(SPATIAL_SIGMA),
-        "--temporal_alpha", str(TEMPORAL_ALPHA),
-    ], env=env)
-
-    # 3. Encode uniform + gaze-guided at every CRF in the sweep
-    manifest_variants = []
-    for crf in CRF_SWEEP:
-        label = f"crf{crf}"
-
-        # uniform: same encoder/CRF/preset, empty qp dir -> zero offsets
-        uniform_out = OUT_DIR / f"uniform_{label}.mp4"
-        print(f"\nEncoding UNIFORM crf={crf}:")
-        t0 = time.time()
-        run_cmd([
-            str(encoder_exe), str(INPUT_VIDEO), str(uniform_out), str(empty_qp_dir),
-            "--crf", str(crf), "--preset", PRESET,
-        ], env=env)
-        uniform_time = time.time() - t0
-        manifest_variants.append({
-            "method": "uniform", "label": label,
-            "path": str(uniform_out.relative_to(OUT_DIR)),
-            "encode_time_s": round(uniform_time, 2),
-        })
-
-        # gaze-guided: same encoder/CRF/preset, real qp dir
-        gaze_out = OUT_DIR / f"gaze_{label}.mp4"
-        print(f"\nEncoding GAZE-GUIDED crf={crf}:")
-        t0 = time.time()
-        run_cmd([
-            str(encoder_exe), str(INPUT_VIDEO), str(gaze_out), str(qp_dir),
-            "--crf", str(crf), "--preset", PRESET,
-        ], env=env)
-        gaze_time = time.time() - t0
-        manifest_variants.append({
-            "method": "gaze", "label": label,
-            "path": str(gaze_out.relative_to(OUT_DIR)),
-            "qp_dir": os.path.relpath(qp_dir, OUT_DIR),
-            "encode_time_s": round(gaze_time, 2),
-        })
-
-    # 4. Write a manifest.json for evaluate_compression.py
-    manifest = {
-        "roi_percentile": 25,
-        "clips": [{
-            "name": INPUT_VIDEO.stem,
-            "reference": str(INPUT_VIDEO.relative_to(OUT_DIR)) if INPUT_VIDEO.is_relative_to(OUT_DIR)
-                         else os.path.relpath(INPUT_VIDEO, OUT_DIR),
-            "roi_source": os.path.relpath(qp_dir, OUT_DIR),
-            "variants": manifest_variants,
-        }],
-    }
-    manifest_path = OUT_DIR / "manifest.json"
-    with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
-
-    print("\n=== Sweep complete ===")
-    print(f"Outputs in: {OUT_DIR}")
-    print(f"Manifest written to: {manifest_path}")
-    print(
-        f"\nNext step (from {OUT_DIR}):\n"
-        f"  python evaluate_compression.py --manifest manifest.json --out_dir results/"
-    )
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--video', type=Path, default=WORK_DIR / 'sample_video.mp4')
+    parser.add_argument('--out-dir', type=Path, default=WORK_DIR / 'ablation_out')
+    parser.add_argument('--qp-dir', type=Path, default=WORK_DIR / 'qp_dir')
+    parser.add_argument('--methods', nargs='+', choices=['uniform', 'gaze', 'center', 'motion'], default=['uniform', 'gaze'])
+    parser.add_argument('--crfs', nargs='+', type=float, default=[18, 21, 24, 27, 30, 33])
+    parser.add_argument('--preset', default='medium')
+    parser.add_argument('--qp-min', type=float, default=-3)
+    parser.add_argument('--qp-max', type=float, default=10)
+    parser.add_argument('--spatial-sigma', type=float, default=1.5)
+    parser.add_argument('--temporal-alpha', type=float, default=1)
+    parser.add_argument('--center-sigma', type=float, default=0.2)
+    parser.add_argument('--roi-source', type=Path, help='Shared scoring QP maps; required when gaze is omitted.')
+    parser.add_argument('--reuse-qp', action='store_true', help='Reuse gaze maps for this exact source clip.')
+    parser.add_argument('--skip-build', action='store_true')
+    parser.add_argument('--encoder', type=Path)
+    parser.add_argument('--compiler')
+    parser.add_argument('--checkpoint', type=Path)
+    args = parser.parse_args(argv)
+    if any(not math.isfinite(v) or not 0 <= v <= 51 for v in args.crfs):
+        parser.error('CRFs must be finite and between 0 and 51')
+    if len(set(args.methods)) != len(args.methods) or len(set(args.crfs)) != len(args.crfs):
+        parser.error('Methods and CRFs must be unique')
+    if not all(map(math.isfinite, [args.qp_min, args.qp_max, args.spatial_sigma, args.temporal_alpha, args.center_sigma])) or args.qp_min >= args.qp_max or args.spatial_sigma < 0 or not 0 <= args.temporal_alpha <= 1 or args.center_sigma <= 0:
+        parser.error('Invalid QP range, smoothing or center sigma')
+    if 'gaze' not in args.methods and args.roi_source is None:
+        parser.error('Specify --roi-source for a shared scoring mask when omitting gaze')
+    video, output, gaze_maps = args.video.resolve(), args.out_dir.resolve(), args.qp_dir.resolve()
+    env = subprocess_environment()
+    try:
+        video_info(video)
+        if args.roi_source:
+            validate_qp_maps(video, args.roi_source.resolve())
+        encoder = select_encoder(args.encoder, args.skip_build, args.compiler, env)
+        output.mkdir(parents=True, exist_ok=True)
+        maps, generation_times = {}, {'uniform': 0.0}
+        if 'gaze' in args.methods:
+            maps['gaze'] = gaze_maps
+            generation_times['gaze'] = prepare_qp_maps(video, gaze_maps, args.reuse_qp, env,
+                args.qp_min, args.qp_max, args.spatial_sigma, args.temporal_alpha, args.checkpoint)
+        for method in args.methods:
+            if method in ('center', 'motion'):
+                maps[method] = output / f'qp_{method}'
+                generation_times[method] = generate_maps(video, maps[method], method, args.qp_min,
+                    args.qp_max, args.spatial_sigma, args.temporal_alpha, args.center_sigma)
+                validate_qp_maps(video, maps[method])
+        variants = []
+        # Fresh empty directory guarantees zero offsets without deleting user files.
+        with tempfile.TemporaryDirectory(prefix='uniform_qp_', dir=output) as empty:
+            maps['uniform'] = Path(empty)
+            for crf in args.crfs:
+                label = f'crf{crf:g}'
+                for method in args.methods:
+                    encoded = output / f'{method}_{label}.mp4'
+                    duration = encode_video(encoder, video, encoded, maps[method], crf, args.preset, env)
+                    generation = generation_times[method]
+                    variant = dict(method=method, label=label, path=relative_path(encoded, output), crf=crf,
+                                   encode_time_s=duration, qp_generation_time_s=generation,
+                                   pipeline_time_s=duration + generation if generation is not None else None)
+                    if method != 'uniform':
+                        variant['qp_dir'] = relative_path(maps[method], output)
+                    variants.append(variant)
+        roi_source = args.roi_source.resolve() if args.roi_source else gaze_maps
+        manifest = dict(roi_percentile=25, protocol=dict(preset=args.preset, qp_min=args.qp_min,
+            qp_max=args.qp_max, spatial_sigma=args.spatial_sigma, temporal_alpha=args.temporal_alpha,
+            center_sigma=args.center_sigma, roi='one shared scoring mask for every method'), clips=[dict(
+            name=video.stem, reference=relative_path(video, output), roi_source=relative_path(roi_source, output),
+            variants=variants)])
+        pending = output / 'manifest.json.tmp'
+        pending.write_text(json.dumps(manifest, indent=2, allow_nan=False), encoding='utf-8')
+        pending.replace(output / 'manifest.json')
+    except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as exc:
+        parser.exit(1, f'Sweep failed: {exc}\n')
+    print(f"Manifest: {output / 'manifest.json'}")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

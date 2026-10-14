@@ -1,0 +1,130 @@
+"""Shared scanpath KL-DTW loss converted from the OSIE training notebook."""
+
+import torch
+import torch.nn as nn
+
+def _cost_matrix(
+    pred:   torch.Tensor,   # (B, T, H, W)
+    target: torch.Tensor,   # (B, T, H, W)
+) -> torch.Tensor:
+    """
+    Compute pairwise KL divergence between every predicted step i and every
+    ground truth step j, giving a cost matrix of shape (B, T_pred, T_gt).
+
+    cost[b, i, j] = KL(target[b,j] || pred[b,i])
+    """
+    B, T, H, W = pred.shape
+    eps = 1e-8
+
+    # flatten spatial dims for broadcasting: (B, T, H*W)
+    p = pred.view(B, T, -1).clamp(min=eps)
+    t = target.view(B, T, -1).clamp(min=eps)
+
+    # normalise
+    p = p / p.sum(dim=-1, keepdim=True)
+    t = t / t.sum(dim=-1, keepdim=True)
+
+    # (B, T_pred, 1, H*W) vs (B, 1, T_gt, H*W)
+    p_exp = p.unsqueeze(2)           # (B, T, 1, H*W)
+    t_exp = t.unsqueeze(1)           # (B, 1, T, H*W)
+
+    # KL(t || p) = sum(t * (log t - log p))
+    cost = (t_exp * (t_exp.log() - p_exp.log())).sum(dim=-1)  # (B, T, T)
+
+    return cost
+
+def soft_dtw(cost_matrix: torch.Tensor, gamma: float = 0.1) -> torch.Tensor:
+    """
+    Soft-DTW: a fully differentiable approximation to DTW.
+
+    Uses the soft-min (log-sum-exp) recurrence instead of hard min, so
+    gradients flow back through the alignment path.
+
+    Args:
+        cost_matrix : (B, T, T) pairwise cost between pred and target steps
+        gamma       : smoothing temperature.
+                      gamma → 0  recovers hard DTW
+                      gamma → ∞  makes all paths equally likely
+
+    Returns:
+        dtw_loss : (B,) soft-DTW distance for each item in the batch
+    """
+    B, T_pred, T_gt = cost_matrix.shape
+    device = cost_matrix.device
+
+    # initialise DP table with +inf
+    # R[b, i, j] = soft-DTW distance up to (i, j)
+    R = torch.full((B, T_pred + 1, T_gt + 1), fill_value=1e9, device=device)
+    R[:, 0, 0] = 0.0
+
+    for i in range(1, T_pred + 1):
+        for j in range(1, T_gt + 1):
+            c = cost_matrix[:, i - 1, j - 1]   # (B,)
+
+            # three possible predecessor cells
+            r0 = R[:, i - 1, j    ]   # came from above
+            r1 = R[:, i    , j - 1]   # came from left
+            r2 = R[:, i - 1, j - 1]   # came from diagonal
+
+            # soft-min via log-sum-exp trick
+            # softmin(a, b, c) = -gamma * log(exp(-a/γ) + exp(-b/γ) + exp(-c/γ))
+            stacked = torch.stack([r0, r1, r2], dim=-1) / gamma        # (B, 3)
+            soft_min = -gamma * torch.logsumexp(-stacked, dim=-1)      # (B,)
+
+            R[:, i, j] = c + soft_min
+
+    return R[:, T_pred, T_gt]
+
+class KLDTWLoss(nn.Module):
+    """
+    KL-DTW loss combining spatial KL divergence with temporal DTW alignment.
+
+    Args:
+        gamma : soft-DTW smoothing temperature (default 0.1)
+        eps   : numerical stability constant for KL divergence
+    """
+
+    def __init__(self, gamma: float = 0.1, eps: float = 1e-8):
+        super().__init__()
+        self.gamma = gamma
+        self.eps   = eps
+
+    def forward(
+        self,
+        predictions: torch.Tensor,   # (B, T, H, W)
+        targets:     torch.Tensor,   # (B, T, H, W)
+        mask:        torch.Tensor,   # (B, T) bool — True = real fixation
+    ) -> torch.Tensor:
+        """
+        Args:
+            predictions : (B, T, H, W) — model predicted heatmaps
+            targets     : (B, T, H, W) — ground truth heatmaps
+            mask        : (B, T)       — False on padded steps
+
+        Returns:
+            scalar loss averaged over the batch
+        """
+        B, T, H, W = predictions.shape
+
+        # ---- apply softmax to predictions so they're proper distributions --
+        # flatten spatial dims, softmax, reshape back
+        # pred_dist = F.softmax(predictions.view(B, T, -1), dim=-1).view(B, T, H, W)
+        pred_dist = predictions  # already normalized by model.forward
+
+        # ---- zero out padded steps in both pred and target -----------------
+        # so padded positions don't contribute to the cost matrix
+        mask_spatial = mask.unsqueeze(-1).unsqueeze(-1).float()  # (B, T, 1, 1)
+        pred_dist = pred_dist * mask_spatial
+        targets   = targets   * mask_spatial
+
+        # ---- build pairwise KL cost matrix ---------------------------------
+        cost = _cost_matrix(pred_dist, targets)   # (B, T, T)
+
+        # ---- soft-DTW over the cost matrix ---------------------------------
+        dtw_loss = soft_dtw(cost, gamma=self.gamma)   # (B,)
+
+        # ---- normalise by the number of real fixations per sequence --------
+        seq_lengths = mask.sum(dim=1).float().clamp(min=1)   # (B,)
+        dtw_loss = dtw_loss / seq_lengths
+
+        return dtw_loss.mean()

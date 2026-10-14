@@ -216,27 +216,25 @@ batch is ready to go straight into `GazeLLNArch.forward()` (via
 
 
 
-1. **`config.DIEM_ROOT` / `config.OUTPUT_ROOT`** -- currently placeholders,
-   point them at your actual paths.
+1. **`config.DIEM_ROOT` / `config.OUTPUT_ROOT`** -- use the default local roots or set `DIEM_ROOT` / `DIEM_OUTPUT_ROOT` environment variables.
 2. **Run `inspect_calibration.py` on new videos**, especially any with
    native height 576 or other resolutions not yet checked -- the pattern
    above is a useful prior, not a guarantee, for videos outside the six
    tested.
-3. **`HEATMAP_SIGMA` / `S`** -- pinned to match your notebook's existing
-   OSIE convention (sigma=1.5, S=8) for architecture compatibility. Don't
+3. **`HEATMAP_SIGMA` / `S`** -- pinned to match the shared model's OSIE convention (sigma=1.5, S=8) for architecture compatibility. Don't
    change these independently of the model itself.
 4. **`WINDOW_LEN_FRAMES` / `WINDOW_STRIDE_FRAMES`** -- current defaults
    (24-frame windows, 50% overlap = 0.8s of context at 30fps) are a
    starting point, not a tuned value.
 5. **Subject-count filtering** (`MIN_SUBJECTS_PER_FRAME`) -- check the
    `valid.mean()` printed by `build_heatmaps.py` per video.
-6. **fps mismatch with your existing video pipeline**: your notebook's
-   `resample_by_pts`/`SinglePassVideoPipeline` code defaults to
-   `target_fps=24`, but DIEM is recorded/delivered at 30fps across all six
-   videos checked. Decide explicitly whether you train at DIEM's native
-   30fps (simplest, what this pipeline assumes) and only resample at the
-   final foveation-encoding stage, or resample training data down to 24fps
-   for consistency.
+6. **Time-step consistency**: continuous DIEM training uses `1/30` seconds per frame, while the encoder's inference default is still `dt=1`. Align these conventions before a joint scientific comparison.
+
+## Shared model and checkpoint
+
+All scripts now use `gaze_model.GazeLLNArch`, with mandatory input and output CoordConv. `DIEM_Modeldata.py` retains compatibility imports only. OSIE training runs through `python trainGazeLNN.py` from the repository root; no notebook is required.
+
+`fine_tune.py` reads the one canonical OSIE checkpoint, `checkpoints/OSIE_model.pt`, via `project_paths.py`. The old root and DIEM copies were removed after a byte-identity check. Output remains `DIEM/DIEM_model.pt`. Both checkpoint loads are strict; incompatible legacy weights are rejected. Pretrained backbone initialization is skipped when complete trained weights are loaded.
 
 ## Known limitations / things I couldn't verify without more data
 

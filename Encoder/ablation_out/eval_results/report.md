@@ -1,6 +1,6 @@
 # Gaze-Guided vs. Uniform Compression -- Evaluation Report
 
-- Generated: 2026-10-14T00:36:21
+- Generated: 2026-10-15T00:48:25
 - Manifest: `/run/media/tejas-kumar-s/Windows/Users/Tejas/Smd/Data/KDAG/GazeLNN Video Encoder/ResearchProjG4_GazeLLN/Encoder/ablation_out/manifest.json`
 - ROI definition: top 25% of macroblocks by predicted saliency (per frame), derived from the QP-offset maps of the canonical `roi_source` for each clip. Same mask used to score every variant of a clip.
 - Pixel metrics use 8-bit OpenCV luma (Y): MSE, PSNR, SSIM and MS-SSIM. PSNR uses pooled pixel MSE (not mean frame dB); SSIM uses 11x11 Gaussian windows, sigma=1.5. MS-SSIM uses five scales and Wang weights; unavailable for undersized frames. These pixel metrics do not measure chroma fidelity.
@@ -86,3 +86,8 @@ Negative BD-Rate % = gaze-guided encoding needs fewer bits for equal quality (bi
 - BD-Rate/BD-quality require >=2 RD points per method to compute at all, and the cubic fit uses up to degree 3; >=4 points are recommended but do not guarantee a reliable fit. Invalid/nonmonotonic curves are reported as N/A. Sweep more CRF/QP-scale values if you see that flag.
 - Compare methods at equal bitrate or equal quality, not equal CRF alone.
 - PSNR/SSIM implementation, pooling, decoding path and VMAF model must stay fixed across comparisons. Old mean-frame-dB results are not directly comparable to pooled-MSE PSNR.
+
+
+## Generated figures
+
+See [figure index](plots/README.md) for PNG/PDF figures, bitrate-pair details and unavailable inputs.
