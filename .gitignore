@@ -21,3 +21,8 @@ Encoder/qp_dir/
 Encoder/ablation_out/eval_results/vmaf_logs
 
 venv/
+
+#test files
+test_metrics.py
+test_model.py
+testMITlowres.py
