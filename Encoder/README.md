@@ -87,12 +87,4 @@ The evaluator can also discover executables inside the Python virtual environmen
 
 DIEM defaults now resolve from its script directory (`DIEM/DIEM_ROOT`, `DIEM/DIEM_Processed`). Set `DIEM_ROOT` and `DIEM_OUTPUT_ROOT` environment variables to override those locations. Calibration overlays use the OS temporary directory.
 
-## Verification
-
-```bash
-python -m unittest -v test_metrics Encoder.test_compression_metrics Encoder.test_portability Encoder.test_encoder
-```
-
-The native tests require a built encoder plus FFmpeg and FFprobe. They encode synthetic B-frame video with and without audio and verify all frames, frame timing and audio retention. They skip with an explicit reason when native tools are absent. A native regression suite should be run on each target OS before claiming that platform has been validated.
-
-The GitHub Actions workflow `.github/workflows/encoder.yml` builds and runs the native/evaluation suites on Ubuntu, macOS and Windows. It requires native tools so missing dependencies cannot silently skip native checks. These remote jobs have not been run from this local session.
+Verification-only regression files and their test-only CI workflow were removed after use. The build, encoding and scientific evaluation tools remain available.

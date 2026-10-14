@@ -55,20 +55,6 @@ python Encoder/run_pipeline.py --video Encoder/sample_video.mp4
 
 Fine-tuning initializes from `checkpoints/OSIE_model.pt` and saves `DIEM/DIEM_model.pt`. Encoder inference defaults to the latter. Review `RUN_CONFIG` before fine-tuning. For baseline sweeps and measured-gaze evaluation, see [Baselines/README.md](Baselines/README.md).
 
-## Verify
+Verification-only test files and their CI workflow were removed after use. `testMITlowres.py` remains because it evaluates trained models on MIT data; it is part of the scientific workflow.
 
-```bash
-python -m unittest -v test_model test_metrics Baselines.test_baselines \
-  Encoder.test_portability Encoder.test_encoder \
-  Encoder.test_compression_metrics Encoder.test_compression_plots
-```
-
-Model tests use synthetic inputs/checkpoints and do not require data downloads. For a bounded OSIE functionality check without changing trained weights:
-
-```bash
-python trainGazeLNN.py --device cpu --epochs 1 --limit-samples 2 \
-  --batch-size 2 --no-pretrained-backbone \
-  --checkpoint /tmp/osie-smoke.pt --evaluate-test
-```
-
-This intentionally small run is not a research training result. [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) documents all files, outputs, workflows and remaining scientific limitations, including the still-missing static-saliency baseline and time-step/preprocessing consistency work.
+[PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) documents all files, outputs, workflows and remaining scientific limitations, including the still-missing static-saliency baseline and time-step/preprocessing consistency work.

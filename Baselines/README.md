@@ -64,11 +64,7 @@ The shifted control can use future predictions and is only an offline diagnostic
 
 ## Validation performed
 
-```bash
-python -m unittest -v Baselines.test_baselines test_metrics \
-  Encoder.test_portability Encoder.test_encoder \
-  Encoder.test_compression_metrics Encoder.test_compression_plots
-```
+The verification-only test source files were removed after the completed checks. Scientific comparison and evaluation scripts remain.
 
 An end-to-end compression smoke run encoded four methods at CRFs 18/24/30/36 on a synthetic 30-frame, 256×256 clip, then produced metrics, five pairwise comparisons and all-method RD plots. Its source/maps/encodes are under `/tmp/gazelnn-baselines-smoke`; generated reports are in `Baselines/compression_smoke_results`. Temporary source files may disappear after a system restart.
 

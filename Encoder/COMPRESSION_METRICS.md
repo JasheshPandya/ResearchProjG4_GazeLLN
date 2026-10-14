@@ -54,10 +54,4 @@ BD-rate and BD-quality are reported for global PSNR, SSIM, MS-SSIM, VMAF, ROI/pe
 
 `run_ablation_sweep.py` records `encode_time_s`, `qp_generation_time_s`, and `pipeline_time_s` for future runs. QP generation includes inference, preprocessing, smoothing and file writing. A standalone gaze encode is charged the full generation cost even when the sweep reuses cached maps. Existing manifests without that timing keep pipeline throughput unavailable. These measurements describe an offline sequential pipeline; they do not measure capture-to-display latency.
 
-Run regression tests with:
-
-```bash
-python -m unittest -v Encoder.test_compression_metrics Encoder.test_compression_plots
-```
-
 Definitions: [SSIM and MS-SSIM authors' resources](https://ece.uwaterloo.ca/~z70wang/research/ssim/), [FFmpeg PSNR and VMAF documentation](https://ffmpeg.org/ffmpeg-filters.html), [BD-rate tutorial](https://arxiv.org/abs/2401.04039).
