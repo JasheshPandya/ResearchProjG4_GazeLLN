@@ -16,7 +16,7 @@ import sys
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-from project_paths import INPUT_VIDEO_DIR, OUTPUT_FILE_DIR, VIDEO_EXTENSIONS
+from project_paths import OUTPUT_FILE_DIR, VIDEO_EXTENSIONS
 
 WORK_DIR = Path(__file__).resolve().parent
 
@@ -34,21 +34,21 @@ SPLIT_MANIFEST = Path(os.environ.get("DIEM_SPLIT_MANIFEST", WORK_DIR / "splits.j
 # Glob (relative to each video's folder) matching one file per subject.
 GAZE_FILE_GLOB = "event_data/*.txt"
 
-# Where the stimulus video lives within each video's folder.
+# Legacy MP4 glob; video_files() accepts every supported video extension.
 VIDEO_FILE_GLOB = "video/*.mp4"
 
 
 def video_files(video_dir):
-    """Match an annotation-folder identifier to the shared input video folder.
+    """Find the stimulus only in this DIEM video's own video/ subfolder.
 
-    Raw subject annotations remain under DIEM_ROOT; stimulus media is central.
-    Reject ambiguous equal stems instead of choosing an arbitrary container.
+    The annotation folder identifies the clip; its single stimulus may have
+    any filename. Reject multiple candidates rather than guessing a source.
     """
-    name = Path(video_dir).name
-    matches = sorted(p for p in INPUT_VIDEO_DIR.iterdir()
-                     if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS and p.stem == name) if INPUT_VIDEO_DIR.is_dir() else []
+    directory = Path(video_dir) / "video"
+    matches = sorted(p for p in directory.iterdir()
+                     if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS) if directory.is_dir() else []
     if len(matches) > 1:
-        raise ValueError(f"Multiple input videos have DIEM identifier {name!r}: {matches}")
+        raise ValueError(f"Multiple source videos in {directory}; keep exactly one stimulus: {matches}")
     return matches
 
 # Recording frame rate DIEM eye-tracking data is sampled at (fixed, per DIEM docs
@@ -199,9 +199,10 @@ MANUAL_CALIBRATION = {
     # "ami_ib4010_closeup_720x576": dict(scale_x=1.0, scale_y=1.0, offset_x=0.0, offset_y=0.0),
 }
 
-# Rolling window settings for continuous (Option B) training.
-WINDOW_LEN_FRAMES = 24      # ~0.8s of context at 30fps
-WINDOW_STRIDE_FRAMES = 12   # 50% overlap
+# Contiguous chunks for truncated BPTT. Carry state only into the next frame.
+WINDOW_LEN_FRAMES = 24      # ~0.8s per gradient chunk at 30fps
+WINDOW_STRIDE_FRAMES = WINDOW_LEN_FRAMES
+RECURRENT_STATE_POLICY = "contiguous_chunks_with_detached_state_v1"
 
 # Minimum number of valid (non-dropped) subjects required for a frame to be
 # included in the aggregated ground-truth heatmap.

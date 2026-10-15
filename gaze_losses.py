@@ -6,6 +6,7 @@ import torch.nn as nn
 def _cost_matrix(
     pred:   torch.Tensor,   # (B, T, H, W)
     target: torch.Tensor,   # (B, T, H, W)
+    eps: float = 1e-8,
 ) -> torch.Tensor:
     """
     Compute pairwise KL divergence between every predicted step i and every
@@ -14,8 +15,6 @@ def _cost_matrix(
     cost[b, i, j] = KL(target[b,j] || pred[b,i])
     """
     B, T, H, W = pred.shape
-    eps = 1e-8
-
     # flatten spatial dims for broadcasting: (B, T, H*W)
     p = pred.view(B, T, -1).clamp(min=eps)
     t = target.view(B, T, -1).clamp(min=eps)
@@ -84,6 +83,8 @@ class KLDTWLoss(nn.Module):
         eps   : numerical stability constant for KL divergence
     """
 
+    mask_policy = "valid_steps_only_v1"
+
     def __init__(self, gamma: float = 0.1, eps: float = 1e-8):
         super().__init__()
         self.gamma = gamma
@@ -102,29 +103,32 @@ class KLDTWLoss(nn.Module):
             mask        : (B, T)       — False on padded steps
 
         Returns:
-            scalar loss averaged over the batch
+            Mean length-normalized loss over nonempty sequences. An entirely
+            masked batch returns differentiable zero.
         """
-        B, T, H, W = predictions.shape
+        if predictions.ndim != 4 or targets.shape != predictions.shape:
+            raise ValueError("Predictions and targets must have matching (B, T, H, W) shapes")
+        if mask.shape != predictions.shape[:2] or mask.dtype != torch.bool:
+            raise ValueError("Mask must be boolean with shape (B, T)")
 
-        # ---- apply softmax to predictions so they're proper distributions --
-        # flatten spatial dims, softmax, reshape back
-        # pred_dist = F.softmax(predictions.view(B, T, -1), dim=-1).view(B, T, H, W)
-        pred_dist = predictions  # already normalized by model.forward
+        _, _, height, width = predictions.shape
+        lengths = mask.sum(dim=1)
+        losses = []
+        # Remove invalid steps before normalization and alignment. Zeroing
+        # them instead would create uniform distributions in _cost_matrix
+        # and extra DTW paths. Group by length to retain batched computation.
+        for length in lengths.unique().tolist():
+            if length == 0:
+                continue
+            rows = lengths == length
+            valid = mask[rows]
+            pred = predictions[rows][valid].reshape(-1, length, height, width)
+            target = targets[rows][valid].reshape(-1, length, height, width)
+            cost = _cost_matrix(pred, target, eps=self.eps)
+            losses.append(soft_dtw(cost, gamma=self.gamma) / length)
 
-        # ---- zero out padded steps in both pred and target -----------------
-        # so padded positions don't contribute to the cost matrix
-        mask_spatial = mask.unsqueeze(-1).unsqueeze(-1).float()  # (B, T, 1, 1)
-        pred_dist = pred_dist * mask_spatial
-        targets   = targets   * mask_spatial
-
-        # ---- build pairwise KL cost matrix ---------------------------------
-        cost = _cost_matrix(pred_dist, targets)   # (B, T, T)
-
-        # ---- soft-DTW over the cost matrix ---------------------------------
-        dtw_loss = soft_dtw(cost, gamma=self.gamma)   # (B,)
-
-        # ---- normalise by the number of real fixations per sequence --------
-        seq_lengths = mask.sum(dim=1).float().clamp(min=1)   # (B,)
-        dtw_loss = dtw_loss / seq_lengths
-
-        return dtw_loss.mean()
+        if not losses:
+            # An empty slice keeps a gradient connection without reading any
+            # masked values, which may contain NaNs or arbitrary padding.
+            return predictions.reshape(-1)[:0].sum()
+        return torch.cat(losses).mean()

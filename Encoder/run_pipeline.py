@@ -20,6 +20,8 @@ else:
     from runtime import subprocess_environment
     from workflow import encode_video, prepare_qp_maps, select_encoder, video_info
 
+from gaze_preprocessing import add_preprocessing_argument
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -35,6 +37,7 @@ def main(argv=None):
     parser.add_argument("--encoder", type=Path)
     parser.add_argument("--compiler")
     parser.add_argument("--checkpoint", type=Path)
+    add_preprocessing_argument(parser)
     args = parser.parse_args(argv)
     if not math.isfinite(args.crf) or not 0 <= args.crf <= 51:
         parser.error("CRF must be finite and between 0 and 51")
@@ -57,7 +60,7 @@ def main(argv=None):
         for video in videos:
             output = args.output.resolve() if args.output else output_dir / names[video]
             maps = args.qp_dir.resolve() if args.qp_dir else output_dir / "_work" / video_id(video) / "qp_gaze"
-            qp_time = prepare_qp_maps(video, maps, args.reuse_qp, env, checkpoint=args.checkpoint)
+            qp_time = prepare_qp_maps(video, maps, args.reuse_qp, env, checkpoint=args.checkpoint, preprocessing=args.preprocessing)
             encode_time = encode_video(encoder, video, output, maps, args.crf, args.preset, env)
             rows.append(dict(video=video.name, source=str(video), output=str(output), qp_dir=str(maps),
                              encode_time_s=encode_time, qp_generation_time_s=qp_time,

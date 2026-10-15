@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torchvision import transforms
 import cv2
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -19,6 +18,8 @@ from gaze_model import GazeLLNArch, load_gaze_model
 from project_paths import (DIEM_CHECKPOINT, INPUT_VIDEO_DIR, OUTPUT_FILE_DIR,
                            discover_videos, video_id, file_sha256)
 from video_timing import DT_POLICY, frame_interval
+from gaze_preprocessing import (GazePreprocessor, add_preprocessing_argument, resolve_checkpoint_preprocessing,
+                                warn_unknown_preprocessing, preprocessing_implementation_sha256)
 
 def mb_grid(native_width = 1920, native_height = 1080):
     """
@@ -42,12 +43,10 @@ _MODEL_CACHE = {
     "device" : None,
     "prev_hmap": None,
     "hx": None,
-    "transform": transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize((256, 384)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+    "transform": None,
+    "preprocessing": None,
+    "checkpoint": None,
+    "requested_profile": None,
 }
 
 def _init_center_gaussian(batch_size=1, hmap_h=32, hmap_w=48, sigma=1.5):
@@ -61,11 +60,11 @@ def _init_center_gaussian(batch_size=1, hmap_h=32, hmap_w=48, sigma=1.5):
 
 
 def reset_model_state():
-    for key in ("model", "device", "prev_hmap", "hx"):
+    for key in _MODEL_CACHE:
         _MODEL_CACHE[key] = None
 
 
-def call_model(frame: np.ndarray, checkpoint_path: str = None, *, dt: float) -> torch.Tensor:
+def call_model(frame: np.ndarray, checkpoint_path: str = None, *, dt: float, preprocessing=None) -> torch.Tensor:
     """
     Passes a video frame [H, W, C] (OpenCV BGR) through GazeLLNArch and returns the saliency heatmap.
 
@@ -80,17 +79,27 @@ def call_model(frame: np.ndarray, checkpoint_path: str = None, *, dt: float) -> 
     if not np.isfinite(dt) or dt <= 0:
         raise ValueError("Explicit elapsed frame time in seconds must be positive and finite")
 
+    ckpt_file = Path(checkpoint_path).expanduser().resolve() if checkpoint_path is not None else DIEM_CHECKPOINT
+    if _MODEL_CACHE["model"] is not None and (_MODEL_CACHE["checkpoint"] != ckpt_file or
+                                             _MODEL_CACHE["requested_profile"] != preprocessing):
+        raise ValueError("Checkpoint/preprocessing changed within a sequence; reset_model_state() before another video")
     if _MODEL_CACHE["model"] is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         _MODEL_CACHE["device"] = device
 
-        ckpt_file = Path(checkpoint_path).expanduser().resolve() if checkpoint_path is not None else DIEM_CHECKPOINT
         print(f"Loading model weights from {ckpt_file}")
         model = load_gaze_model(ckpt_file, device)
 
+        resolved = resolve_checkpoint_preprocessing(ckpt_file, preprocessing)
+        warn_unknown_preprocessing(resolved)
+        transform = GazePreprocessor(resolved['spec']['image_size'], resolved['spec']['profile'])
+        _MODEL_CACHE["preprocessing"] = resolved
+        _MODEL_CACHE["transform"] = transform
+        _MODEL_CACHE["checkpoint"] = ckpt_file
+        _MODEL_CACHE["requested_profile"] = preprocessing
         model.eval()
         _MODEL_CACHE["model"] = model
-        _MODEL_CACHE["prev_hmap"] = _init_center_gaussian().to(device)
+        _MODEL_CACHE["prev_hmap"] = _init_center_gaussian(hmap_h=model.hmap_h, hmap_w=model.hmap_w).to(device)
         _MODEL_CACHE["hx"] = None
 
     model = _MODEL_CACHE["model"]
@@ -224,6 +233,7 @@ def main(sys_args=None):
 
     parser.add_argument("--input-dir", type=Path, default=INPUT_VIDEO_DIR)
     parser.add_argument("--output-dir", dest="output_dir_root", type=Path, default=OUTPUT_FILE_DIR)
+    add_preprocessing_argument(parser)
     args = parser.parse_args(sys_args)
     if args.checkpoint is not None and not args.checkpoint.is_file():
         parser.error(f"Checkpoint not found: {args.checkpoint}")
@@ -271,7 +281,7 @@ def generate_video(args):
         if not ret:
             break
 
-        hm = call_model(frame, checkpoint_path=args.checkpoint, dt=dt)
+        hm = call_model(frame, checkpoint_path=args.checkpoint, dt=dt, preprocessing=args.preprocessing)
 
         # Append torch.Tensor directly (already torch.float32)
         heatmaps.append(hm)
@@ -321,6 +331,9 @@ def generate_video(args):
 
     # Write metadata
     metadata = {
+        "input_preprocessing": _MODEL_CACHE["preprocessing"]["spec"],
+        "preprocessing_provenance": _MODEL_CACHE["preprocessing"],
+        "preprocessing_implementation_sha256": preprocessing_implementation_sha256(),
         "source_video": str(args.video_path.resolve()),
         "source_sha256": file_sha256(args.video_path),
         "checkpoint_sha256": file_sha256(args.checkpoint or DIEM_CHECKPOINT),

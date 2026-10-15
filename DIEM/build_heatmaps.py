@@ -23,54 +23,39 @@ Output per video: a compressed .npz with
 from __future__ import annotations
 
 import json
-import re
-import subprocess
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-import config as cfg
+if __package__:
+    from . import config as cfg
+else:
+    import config as cfg
+from DIEM.frame_integrity import target_alignment_record, read_target_alignment
+from project_paths import file_sha256
 
 
 # ---------------------------------------------------------------------------
 # Native video resolution detection
 # ---------------------------------------------------------------------------
 
-_RES_SUFFIX_RE = re.compile(r"(\d{3,5})x(\d{3,5})")
-
-
 def get_native_resolution(video_name: str, diem_root: Path) -> Tuple[int, int]:
-    """Return (width, height) for a video, via ffprobe on the actual file,
-    falling back to parsing the folder name's trailing _WxH suffix (DIEM
-    folder names consistently end this way in both samples checked so far,
-    e.g. ..._1280x720, ..._720x576) if ffprobe is unavailable or fails."""
-    video_dir = diem_root / video_name
-    matches = cfg.video_files(video_dir)
-    if matches:
-        try:
-            out = subprocess.run(
-                ["ffprobe", "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=width,height",
-                 "-of", "csv=p=0", str(matches[0])],
-                capture_output=True, text=True, check=True,
-            ).stdout.strip()
-            w, h = out.split(",")[:2]
-            return int(w), int(h)
-        except Exception as e:
-            print(f"  [WARN] ffprobe failed for {video_name} ({e}), "
-                  f"falling back to folder-name suffix")
-
-    m = _RES_SUFFIX_RE.search(video_name)
-    if m:
-        return int(m.group(1)), int(m.group(2))
-
-    raise ValueError(
-        f"Could not determine native resolution for {video_name} -- neither "
-        f"ffprobe nor folder-name suffix worked. Add an entry to "
-        f"config.MANUAL_CALIBRATION or fix the video file."
-    )
+    """Read actual stimulus dimensions with the same decoder used for frames."""
+    import cv2
+    matches = cfg.video_files(diem_root / video_name)
+    if not matches:
+        raise ValueError(f"No source video for {video_name} in {diem_root / video_name / 'video'}; "
+                         "add the DIEM stimulus to establish native dimensions")
+    cap = cv2.VideoCapture(str(matches[0]))
+    try:
+        width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if not cap.isOpened() or width <= 0 or height <= 0:
+            raise ValueError(f"Cannot read source dimensions: {matches[0]}")
+        return width, height
+    finally:
+        cap.release()
 
 
 # ---------------------------------------------------------------------------
@@ -161,10 +146,31 @@ def build_video_heatmaps(video_name: str, fixations_root: Path,
     native_w, native_h = get_native_resolution(video_name, diem_root)
     calib = fit_calibration(video_name, subjects, native_w, native_h)
 
-    max_frame = max(
-        (fx["end_frame"] for fxs in subjects.values() for fx in fxs), default=0
-    )
-    num_frames = max_frame + 1  # frames are 1-indexed in DIEM; keep index 0 unused/empty
+    sources = cfg.video_files(diem_root / video_name)
+    if not sources:
+        raise ValueError(f"No source video for {video_name}; cannot establish frame mapping")
+    import cv2
+    from video_timing import frame_interval
+    cap = cv2.VideoCapture(str(sources[0]))
+    try:
+        if not cap.isOpened():
+            raise ValueError(f"Cannot open source video: {sources[0]}")
+        source_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        frame_interval(fps)
+        if source_count <= 0 or not np.isclose(fps, cfg.GAZE_FPS, rtol=1e-4):
+            raise ValueError("Source count/FPS incompatible with DIEM annotations")
+    finally:
+        cap.release()
+    alignment = target_alignment_record(sources[0], source_count, fps)
+    for fxs in subjects.values():
+        for fx in fxs:
+            start, end = fx["start_frame"], fx["end_frame"]
+            if not isinstance(start, int) or not isinstance(end, int) or not 1 <= start <= end <= source_count:
+                raise ValueError(f"Annotation interval {start}..{end} outside source frames 1..{source_count}: {video_name}")
+    # Missing gaze at either edge remains invalid on a real source frame.
+    # No images or annotated out-of-range frames are invented or truncated.
+    num_frames = source_count + 1  # index zero is an unused annotation slot
 
     Hg, Wg = cfg.HMAP_HEIGHT, cfg.HMAP_WIDTH
     heatmaps = np.zeros((num_frames, Hg, Wg), dtype=np.float32)
@@ -187,8 +193,6 @@ def build_video_heatmaps(video_name: str, fixations_root: Path,
             xi = min(max(xi, 0), Wg - 1)
             yi = min(max(yi, 0), Hg - 1)
             for frame_idx in range(fx["start_frame"], fx["end_frame"] + 1):
-                if frame_idx >= num_frames:
-                    continue
                 heatmaps[frame_idx, yi, xi] += 1.0
                 subject_counts[frame_idx] += 1
 
@@ -208,7 +212,9 @@ def build_video_heatmaps(video_name: str, fixations_root: Path,
               f"calibration manually (e.g. via the overlay debug helper) "
               f"before trusting its heatmaps")
 
-    calib_info = dict(mode=cfg.CALIBRATION_MODE_OVERRIDES.get(video_name, cfg.CALIBRATION_MODE),
+    if file_sha256(sources[0]) != alignment["source_sha256"]:
+        raise ValueError("Source changed while building targets")
+    calib_info = dict(alignment=alignment, mode=cfg.CALIBRATION_MODE_OVERRIDES.get(video_name, cfg.CALIBRATION_MODE),
                        native_w=native_w, native_h=native_h,
                        drop_fraction=drop_frac, **calib)
     return heatmaps, valid, calib_info
@@ -250,11 +256,19 @@ def main():
     for vd in video_dirs:
         out_path = heatmaps_root / f"{vd.name}.npz"
         if args.skip_existing and out_path.exists():
-            print(f"Skipping {vd.name} (heatmap already exists, --skip-existing)")
+            with np.load(out_path, allow_pickle=False) as data:
+                record = read_target_alignment(data)
+                sources = cfg.video_files(cfg.DIEM_ROOT / vd.name)
+                if not sources or file_sha256(sources[0]) != record["source_sha256"]:
+                    raise ValueError(f"Existing targets have a different source: {out_path}; rebuild")
+            print(f"Skipping {vd.name} (source/frame mapping verified, --skip-existing)")
             continue
         print(f"Building heatmaps for {vd.name} ...")
         heatmaps, valid, calib_info = build_video_heatmaps(vd.name, fixations_root, cfg.DIEM_ROOT)
-        np.savez_compressed(out_path, heatmaps=heatmaps, valid=valid, fps=cfg.GAZE_FPS)
+        alignment = calib_info["alignment"]
+        np.savez_compressed(out_path, heatmaps=heatmaps, valid=valid, fps=cfg.GAZE_FPS,
+                            frame_numbers=np.r_[-1, np.arange(1, len(valid))],
+                            alignment_json=json.dumps(alignment))
         print(f"  calibration: {calib_info}")
         print(f"  {valid.sum()}/{len(valid)} frames valid -> {out_path}")
         existing_rows[vd.name] = dict(

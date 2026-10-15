@@ -53,7 +53,10 @@ class StaticSaliency:
         self.model.requires_grad_(False)
         self.provenance = dict(model="DeepGazeI", source_revision=SOURCE_REVISION,
             checkpoint=str(self.checkpoint), checkpoint_sha256=digest, center_prior="uniform log density",
-            independent_frames=True, input_shape=list(self.input_shape), temporal_alpha=1.0)
+            independent_frames=True, input_shape=list(self.input_shape), temporal_alpha=1.0,
+            input_preprocessing=dict(input_color="RGB", input_range=[0, 255], output_dtype="float32",
+                resize="OpenCV INTER_AREA", normalization="upstream DeepGaze AlexNet Normalizer inside model",
+                external_imagenet_normalization=False))
 
     def __call__(self, frame):
         import cv2

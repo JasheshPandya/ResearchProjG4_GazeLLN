@@ -100,13 +100,18 @@ def membership(path, video_name, partition="test"):
                 video_name=video_name, partition=partition, membership_verified=True)
 
 
-def record_training(checkpoint, manifest_path, train_names, val_names, **settings):
+def training_split_binding(manifest_path, train_names, val_names):
     manifest = read_manifest(manifest_path)
-    if set(train_names) != set(manifest["splits"]["train"]) or set(val_names) != set(manifest["splits"]["val"]):
+    if len(train_names) != len(set(train_names)) or len(val_names) != len(set(val_names)) or \
+            set(train_names) != set(manifest["splits"]["train"]) or set(val_names) != set(manifest["splits"]["val"]):
         raise ValueError("Training/validation loaders do not match the recorded video splits")
+    return dict(split_manifest_sha256=file_sha256(manifest_path), splits=manifest["splits"], dt_policy=DT_POLICY)
+
+
+def record_training(checkpoint, manifest_path, train_names, val_names, **settings):
+    """Legacy split-only record helper; trainers use TrainingRecorder for full provenance."""
     record = dict(schema_version=1, checkpoint_sha256=file_sha256(checkpoint),
-                  split_manifest_sha256=file_sha256(manifest_path), splits=manifest["splits"],
-                  dt_policy=DT_POLICY, settings=settings)
+                  **training_split_binding(manifest_path, train_names, val_names), settings=settings)
     path = Path(str(checkpoint) + ".training.json")
     pending = Path(str(path) + ".tmp")
     pending.write_text(json.dumps(record, indent=2, allow_nan=False) + "\n", encoding="utf-8")

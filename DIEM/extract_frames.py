@@ -1,51 +1,77 @@
-"""
-Extract and resize video frames to MODEL_INPUT_WIDTH x MODEL_INPUT_HEIGHT via
-ffmpeg, indexed to match the DIEM gaze files' 1-indexed frame numbers.
+"""Extract 1-indexed RGB PNG frames with the shared inference resize policy.
 
-Confirmed against the 50_people_brooklyn_no_voices_1280x720 sample:
-- native video is exactly 1280x720 @ 30/1 fps (matches GAZE_FPS and
-  DEFAULT_SCREEN_RESOLUTION), duration ~122.3s
-- video frame count (ffprobe nb_frames) and gaze-file row count differ by
-  only ~2 frames at the tail, which the dataset/heatmap code already
-  tolerates (short sequences get zero-padded, see dataset.py)
-
-Requires ffmpeg on PATH.
+OpenCV decoding matches encoder/gaze evaluation; Pillow bilinear resizing
+matches gaze_preprocessing.py. Stored PNGs contain unnormalized RGB bytes.
 """
 
 from __future__ import annotations
 
-import subprocess
+import json
+import tempfile
+
+import cv2
 from pathlib import Path
 
-import config as cfg
+if __package__:
+    from . import config as cfg
+else:
+    import config as cfg
+from gaze_preprocessing import resize_rgb_image, preprocessing_spec, preprocessing_implementation_sha256
+from project_paths import file_sha256
+from DIEM.frame_integrity import validate_frame_cache
 
 
 def extract_frames_for_video(video_dir: Path, frames_root: Path) -> None:
     video_name = video_dir.name
     matches = cfg.video_files(video_dir)
     if not matches:
-        print(f"  [WARN] no video file found in {video_dir} "
-              f"-- put a matching video in {cfg.INPUT_VIDEO_DIR}")
-        return
+        raise ValueError(f"No source video for {video_dir}; put the DIEM stimulus in {video_dir / 'video'}")
     video_path = matches[0]
 
     out_dir = frames_root / video_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # -start_number 1 matches DIEM's 1-indexed gaze-file frame numbering.
-    cmd = [
-        "ffmpeg", "-y", "-i", str(video_path),
-        "-vf", f"scale={cfg.MODEL_INPUT_WIDTH}:{cfg.MODEL_INPUT_HEIGHT}",
-        "-start_number", "1",
-        str(out_dir / "frame_%06d.png"),
-    ]
-    print(f"  running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"  [ERROR] ffmpeg failed for {video_path}:\n{result.stderr[-2000:]}")
-    else:
-        n_frames = len(list(out_dir.glob("frame_*.png")))
-        print(f"  extracted {n_frames} frames -> {out_dir}")
+    size = (cfg.MODEL_INPUT_HEIGHT, cfg.MODEL_INPUT_WIDTH)
+    source_sha = file_sha256(video_path)
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        if not cap.isOpened():
+            raise ValueError(f"Cannot open video: {video_path}")
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        from video_timing import frame_interval
+        frame_interval(fps)
+        # Complete the new extraction before replacing any old frame files.
+        with tempfile.TemporaryDirectory(prefix="extract_", dir=out_dir) as temporary:
+            pending = Path(temporary)
+            count = 0
+            while True:
+                ok, bgr = cap.read()
+                if not ok:
+                    break
+                count += 1
+                image = resize_rgb_image(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), size)
+                image.save(pending / f"frame_{count:06d}.png")
+            if count == 0 or count != int(cap.get(cv2.CAP_PROP_FRAME_COUNT)):
+                raise ValueError(f"Incomplete frame extraction for {video_path}: decoded {count}")
+            if file_sha256(video_path) != source_sha:
+                raise ValueError("Source changed during extraction")
+            metadata = dict(version=2, source_video=str(video_path.resolve()), source_sha256=source_sha,
+                frame_sha256={p.name: file_sha256(p) for p in sorted(pending.glob("frame_*.png"))},
+                num_frames=count, start_number=1, fps=fps, image_size=list(size), color="RGB uint8; no normalization",
+                resize=preprocessing_spec(size)["resize"],
+                preprocessing_implementation_sha256=preprocessing_implementation_sha256())
+            (pending / "frames_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+            for index in range(1, count + 1):
+                path = pending / f"frame_{index:06d}.png"
+                path.replace(out_dir / path.name)
+            expected = set(metadata["frame_sha256"])
+            for obsolete in out_dir.glob("frame_*.png"):
+                if obsolete.name not in expected:
+                    obsolete.unlink()
+            (pending / "frames_metadata.json").replace(out_dir / "frames_metadata.json")
+        print(f"  extracted {count} RGB frames -> {out_dir}")
+    finally:
+        cap.release()
 
 
 def main():
@@ -72,7 +98,14 @@ def main():
     for vd in video_dirs:
         out_dir = frames_root / vd.name
         if args.skip_existing and out_dir.exists() and any(out_dir.glob("frame_*.png")):
-            print(f"Skipping {vd.name} (frames already extracted, --skip-existing)")
+            sources = cfg.video_files(vd)
+            if not sources:
+                ap.error(f"No source video for {vd}")
+            try:
+                validate_frame_cache(out_dir, (cfg.MODEL_INPUT_HEIGHT, cfg.MODEL_INPUT_WIDTH), sources[0])
+            except (ValueError, OSError, KeyError) as exc:
+                ap.error(str(exc))
+            print(f"Skipping {vd.name} (verified extracted frames, --skip-existing)")
             continue
         print(f"Extracting frames for {vd.name} ...")
         extract_frames_for_video(vd, frames_root)

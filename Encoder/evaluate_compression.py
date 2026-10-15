@@ -90,6 +90,9 @@ import logging
 import os
 import subprocess
 import sys
+import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from dataclasses import dataclass, field, asdict
 from contextlib import contextmanager
@@ -256,7 +259,8 @@ def vmaf_available() -> bool:
 
 
 def compute_vmaf(ref_path: Path, dist_path: Path, model_path: Optional[str], work_dir: Path,
-                 frame_limit: Optional[int] = None) -> tuple:
+                 frame_limit: Optional[int] = None, threads: int = 0,
+                 decoder_threads: int = 2) -> tuple:
     """Compute VMAF for a distorted video against a reference.
 
     Returns
@@ -290,9 +294,11 @@ def compute_vmaf(ref_path: Path, dist_path: Path, model_path: Optional[str], wor
         model_opt = f":model=path={model_copy.name}"
     filt = (
         f"[0:v]settb=AVTB,setpts=PTS-STARTPTS[dist];[1:v]settb=AVTB,setpts=PTS-STARTPTS[ref];"
-        f"[dist][ref]libvmaf=log_fmt=json:log_path={log_filename}:pool=mean:shortest=1:repeatlast=0{model_opt}"
+        f"[dist][ref]libvmaf=log_fmt=json:log_path={log_filename}:pool=mean:shortest=1:repeatlast=0"
+        f":n_threads={threads or min(8, available_cpus())}{model_opt}"
     )
-    cmd = [FFMPEG_BIN, "-y", "-i", str(dist_path.resolve()), "-i", str(ref_path.resolve()),
+    cmd = [FFMPEG_BIN, "-y", "-threads", str(decoder_threads), "-i", str(dist_path.resolve()),
+           "-threads", str(decoder_threads), "-i", str(ref_path.resolve()),
            "-lavfi", filt]
     if frame_limit is not None:
         cmd += ["-frames:v", str(frame_limit)]
@@ -466,8 +472,8 @@ def _gblur(x: np.ndarray) -> np.ndarray:
 
 def squared_error_map(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """ Compute pixel-wise squared error between two arrays. """
-    a = a.astype(np.float32)
-    b = b.astype(np.float32)
+    a = a.astype(np.float32, copy=False)
+    b = b.astype(np.float32, copy=False)
     return (a - b) ** 2
 
 
@@ -491,8 +497,8 @@ def _ssim_maps(a: np.ndarray, b: np.ndarray) -> tuple:
     Compute once per frame pair and reuse for global/ROI/periphery
     averages -- this is the expensive step, so avoid recomputing it
     per region."""
-    a = a.astype(np.float32)
-    b = b.astype(np.float32)
+    a = a.astype(np.float32, copy=False)
+    b = b.astype(np.float32, copy=False)
     C1 = np.float32((0.01 * 255) ** 2)
     C2 = np.float32((0.03 * 255) ** 2)
 
@@ -525,7 +531,7 @@ def ms_ssim(a: np.ndarray, b: np.ndarray, first_maps: Optional[tuple] = None) ->
     """
     if a.shape != b.shape or a.ndim != 2:
         raise ValueError("MS-SSIM requires equally sized 2-D luma frames")
-    a, b = a.astype(np.float32), b.astype(np.float32)
+    a, b = a.astype(np.float32, copy=False), b.astype(np.float32, copy=False)
     factors = []
     for level in range(5):
         if min(a.shape) < 11:
@@ -535,10 +541,13 @@ def ms_ssim(a: np.ndarray, b: np.ndarray, first_maps: Optional[tuple] = None) ->
         factors.append(np.clip(np.mean(component[5:-5, 5:-5], dtype=np.float64), 0, 1))
         if level < 4:
             padding = ((0, a.shape[0] % 2), (0, a.shape[1] % 2))
-            a = np.pad(a, padding, mode="reflect")
-            b = np.pad(b, padding, mode="reflect")
-            a = a.reshape(a.shape[0] // 2, 2, a.shape[1] // 2, 2).mean(axis=(1, 3))
-            b = b.reshape(b.shape[0] // 2, 2, b.shape[1] // 2, 2).mean(axis=(1, 3))
+            if any(pad[1] for pad in padding):
+                a = np.pad(a, padding, mode="reflect")
+                b = np.pad(b, padding, mode="reflect")
+            # Exact 2x2 area averaging, using OpenCV's SIMD implementation.
+            size = (a.shape[1] // 2, a.shape[0] // 2)
+            a = cv2.resize(a, size, interpolation=cv2.INTER_AREA)
+            b = cv2.resize(b, size, interpolation=cv2.INTER_AREA)
     return float(np.prod(np.asarray(factors) ** _MS_SSIM_WEIGHTS))
 
 
@@ -574,6 +583,122 @@ def ssim_from_map(smap: np.ndarray, mask: Optional[np.ndarray] = None) -> float:
 
 def to_luma(frame_bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YCrCb)[:, :, 0]
+
+
+def available_cpus() -> int:
+    return (getattr(os, "process_cpu_count", os.cpu_count)() or 1)
+
+
+def automatic_workers(height: int, width: int) -> int:
+    """Keep 4K frame intermediates from exhausting RAM on smaller machines."""
+    workers = min(8, available_cpus())
+    try:
+        # MemAvailable includes reclaimable filesystem cache, unlike free pages.
+        if sys.platform.startswith("linux"):
+            entries = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+            available = int(entries["MemAvailable"].split()[0]) * 1024
+        else:
+            available = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        # Conservative peak including SSIM temporaries, queued luma, and decoders.
+        workers = min(workers, max(1, int(available * 0.5) // (height * width * 96)))
+    except (OSError, ValueError, KeyError, AttributeError):
+        workers = min(workers, 4)
+    return workers
+
+
+def score_frame(y_ref, y_dist, roi_source, index, roi_percentile):
+    """Return only scalar metrics; large frame intermediates stay in the worker."""
+    mask = roi_source.roi_mask(index, *y_ref.shape, roi_percentile)
+    se = squared_error_map(y_ref, y_dist)
+    roi_se = se[mask]
+    periphery_se = se[~mask]
+    totals = np.array([np.sum(v, dtype=np.float64) for v in (se, roi_se, periphery_se)])
+    counts = np.array([se.size, roi_se.size, periphery_se.size], dtype=np.int64)
+    psnr = [psnr_from_mse(total / count if count else float("nan"))
+            for total, count in zip(totals, counts)]
+    del se, roi_se, periphery_se
+    maps = _ssim_maps(y_ref, y_dist)
+    ssim = [ssim_from_map(maps[0], m) for m in (None, mask, ~mask)]
+    return totals, counts, psnr, ssim, ms_ssim(y_ref, y_dist, first_maps=maps)
+
+
+def make_cuda_scorer(device):
+    """Return an optional CUDA scorer without requiring Torch for CPU runs."""
+    if device not in ("auto", "cpu", "cuda"):
+        raise ValueError("device must be auto, cpu or cuda")
+    if device == "cpu":
+        return None
+    try:
+        if __package__:
+            from .compression_cuda import TorchFrameScorer, torch
+        else:
+            from compression_cuda import TorchFrameScorer, torch
+        if not torch.cuda.is_available():
+            raise RuntimeError("PyTorch cannot access a CUDA GPU")
+        scorer = TorchFrameScorer()
+        log.info(f"CUDA pixel metrics: {torch.cuda.get_device_name(scorer.device)}")
+        return scorer
+    except (ImportError, OSError, RuntimeError) as exc:
+        if device == "cuda":
+            raise RuntimeError(f"CUDA metrics requested but unavailable: {exc}. Use --device cpu for CPU scoring.") from exc
+        log.warning(f"CUDA unavailable ({exc}); using CPU pixel metrics.")
+        return None
+
+
+def score_video_frames(cap_ref, cap_dist, n_frames, roi_source, roi_percentile, workers,
+                       cuda_scorer=None, allow_cpu_fallback=False):
+    """Decode sequentially, score concurrently, and yield in frame order.
+
+    The bounded queue holds at most two frames per worker. NumPy/OpenCV release
+    the GIL during expensive kernels; threads avoid copying 4K frames to processes.
+    """
+    def frames():
+        for index in range(n_frames):
+            ok_r, ref = cap_ref.read()
+            ok_d, dist = cap_dist.read()
+            if not (ok_r and ok_d):
+                break
+            # Own compact luma buffers; don't retain three-channel frame storage.
+            yield (to_luma(ref).copy(), to_luma(dist).copy(), roi_source, index, roi_percentile)
+
+    previous_threads = cv2.getNumThreads()
+    cv2.setNumThreads(1)  # Avoid workers each spawning a full OpenCV thread team.
+    try:
+        if cuda_scorer is not None:
+            for args in frames():
+                if cuda_scorer is None:
+                    yield score_frame(*args)
+                    continue
+                try:
+                    scores = cuda_scorer(*args)
+                except RuntimeError as exc:
+                    if not allow_cpu_fallback:
+                        raise
+                    # Retry this same frame once on CPU; keep alignment/coverage.
+                    log.warning(f"CUDA scoring failed ({exc}); remaining frames use CPU. "
+                                "Use --device cpu for the threaded CPU evaluator.")
+                    cuda_scorer.used_cpu_fallback = True
+                    cuda_scorer = None
+                    scores = score_frame(*args)
+                yield scores
+        elif workers == 1:
+            for args in frames():
+                yield score_frame(*args)
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="quality") as executor:
+                pending = deque()
+                try:
+                    for args in frames():
+                        pending.append(executor.submit(score_frame, *args))
+                        if len(pending) >= workers * 2:
+                            yield pending.popleft().result()
+                    while pending:
+                        yield pending.popleft().result()
+                finally:
+                    for future in pending:
+                        future.cancel()
+    finally:
+        cv2.setNumThreads(previous_threads)
 
 
 # --------------------------------------------------------------------------- #
@@ -616,6 +741,7 @@ class VariantResult:
     vmaf_min: Optional[float] = None
     vmaf_frames: int = 0
     vmaf_model: str = "version=vmaf_v0.6.1"
+    metric_device: str = "cpu"
     encode_time_s: Optional[float] = None
     encode_fps: Optional[float] = None
     qp_generation_time_s: Optional[float] = None
@@ -647,7 +773,9 @@ def apply_timings(res: VariantResult, variant: dict, frame_count: Optional[int])
 def evaluate_variant(clip_name: str, ref_path: Path, variant: dict,
                       roi_source: RoiSource, roi_percentile: float,
                       vmaf_model_path: Optional[str], work_dir: Path,
-                      manifest_dir: Optional[Path] = None) -> VariantResult:
+                      manifest_dir: Optional[Path] = None, workers: int = 0,
+                      vmaf_threads: int = 0, decoder_threads: int = 2,
+                      device: str = "auto") -> VariantResult:
     dist_path = resolve_manifest_path(variant["path"], manifest_dir or Path.cwd())
     method = variant["method"]
     label = variant.get("label", dist_path.stem)
@@ -671,8 +799,13 @@ def evaluate_variant(clip_name: str, ref_path: Path, variant: dict,
     if res.width and res.height and res.fps > 0:
         res.bits_per_pixel_frame = res.bitrate_kbps * 1000 / (res.width * res.height * res.fps)
 
-    cap_ref = cv2.VideoCapture(str(ref_path))
-    cap_dist = cv2.VideoCapture(str(dist_path))
+    if workers < 0 or vmaf_threads < 0 or decoder_threads < 1:
+        raise ValueError("workers/vmaf_threads must be nonnegative and decoder_threads positive")
+    def open_video(path):
+        return cv2.VideoCapture(str(path), cv2.CAP_FFMPEG,
+                                [cv2.CAP_PROP_N_THREADS, decoder_threads])
+    cap_ref = open_video(ref_path)
+    cap_dist = open_video(dist_path)
     if not cap_ref.isOpened() or not cap_dist.isOpened():
         cap_ref.release()
         cap_dist.release()
@@ -708,35 +841,37 @@ def evaluate_variant(clip_name: str, ref_path: Path, variant: dict,
     se_totals = np.zeros(3, dtype=np.float64)
     pixel_counts = np.zeros(3, dtype=np.int64)
 
-    for idx in range(n_frames):
-        ok_r, fr_ref = cap_ref.read()
-        ok_d, fr_dist = cap_dist.read()
-        if not (ok_r and ok_d):
-            break
-
-        y_ref = to_luma(fr_ref)
-        y_dist = to_luma(fr_dist)
-
-        roi_mask = roi_source.roi_mask(idx, y_ref.shape[0], y_ref.shape[1], roi_percentile)
-        periph_mask = ~roi_mask
-
-        se_map = squared_error_map(y_ref, y_dist)
-        psnr_g.append(psnr_from_se_map(se_map))
-        psnr_r.append(psnr_from_se_map(se_map, roi_mask))
-        psnr_p.append(psnr_from_se_map(se_map, periph_mask))
-        for region, vals in enumerate((se_map, se_map[roi_mask], se_map[periph_mask])):
-            se_totals[region] += np.sum(vals, dtype=np.float64)
-            pixel_counts[region] += vals.size
-
-        maps = _ssim_maps(y_ref, y_dist)
-        smap = maps[0]
-        ssim_g.append(ssim_from_map(smap))
-        ssim_r.append(ssim_from_map(smap, roi_mask))
-        ssim_p.append(ssim_from_map(smap, periph_mask))
-        ms_scores.append(ms_ssim(y_ref, y_dist, first_maps=maps))
-
-    cap_ref.release()
-    cap_dist.release()
+    workers = min(n_frames or 1, workers or automatic_workers(*ref_shape))
+    started = last_progress = time.perf_counter()
+    try:
+        cuda_scorer = make_cuda_scorer(device)
+        res.metric_device = "cuda" if cuda_scorer is not None else "cpu"
+        mode = "CUDA" if cuda_scorer is not None else f"{workers} CPU frame workers"
+        log.info(f"[{clip_name}/{method}/{label}] Scoring {n_frames} frames using {mode} "
+                 f"and {decoder_threads} threads per decoder.")
+        for totals, counts, psnr, ssim, ms_score in score_video_frames(
+                cap_ref, cap_dist, n_frames, roi_source, roi_percentile, workers,
+                cuda_scorer=cuda_scorer, allow_cpu_fallback=device == "auto"):
+            se_totals += totals
+            pixel_counts += counts
+            for values, value in zip((psnr_g, psnr_r, psnr_p), psnr):
+                values.append(value)
+            for values, value in zip((ssim_g, ssim_r, ssim_p), ssim):
+                values.append(value)
+            ms_scores.append(ms_score)
+            now = time.perf_counter()
+            if now - last_progress >= 10:
+                log.info(f"  Pixel metrics: {len(psnr_g)}/{n_frames} frames "
+                         f"({len(psnr_g) / (now - started):.1f} fps)")
+                last_progress = now
+        if cuda_scorer is not None and cuda_scorer.used_cpu_fallback:
+            res.metric_device = "cuda+cpu"
+    finally:
+        cap_ref.release()
+        cap_dist.release()
+    pixel_seconds = time.perf_counter() - started
+    log.info(f"  Pixel metrics completed in {pixel_seconds:.2f}s "
+             f"({len(psnr_g) / max(pixel_seconds, 1e-9):.1f} fps)")
 
     res.frames_evaluated = len(psnr_g)
     if res.frames_evaluated == 0:
@@ -765,7 +900,12 @@ def evaluate_variant(clip_name: str, ref_path: Path, variant: dict,
     if np.isnan(res.ms_ssim_global):
         notes.append("Five-scale MS-SSIM unavailable: a downsampled scale is smaller than 11 pixels.")
 
-    vmaf_score, vmaf_per_frame = compute_vmaf(ref_path, dist_path, vmaf_model_path, work_dir, frame_limit=n_frames)
+    log.info(f"  VMAF: {vmaf_threads or min(8, available_cpus())} threads")
+    vmaf_started = time.perf_counter()
+    vmaf_score, vmaf_per_frame = compute_vmaf(
+        ref_path, dist_path, vmaf_model_path, work_dir, frame_limit=n_frames,
+        threads=vmaf_threads, decoder_threads=decoder_threads)
+    log.info(f"  VMAF completed in {time.perf_counter() - vmaf_started:.2f}s")
     if vmaf_per_frame and (len(vmaf_per_frame) != n_frames or not np.isfinite(vmaf_per_frame).all()):
         notes.append("VMAF frame scores are incomplete or invalid; VMAF scores discarded.")
         vmaf_score, vmaf_per_frame = None, []
@@ -899,7 +1039,7 @@ DETAILED_FIELDS = [
     "bitrate_source", "fps", "bits_per_pixel_frame", "roi_fraction",
     "mse_global", "mse_roi", "mse_periphery", "ms_ssim_global",
     "psnr_p5", "ssim_p5", "ms_ssim_p5", "vmaf_p5", "vmaf_min", "vmaf_frames", "vmaf_model",
-    "frame_metrics_path",
+    "frame_metrics_path", "metric_device",
     "encode_fps", "qp_generation_time_s", "pipeline_time_s", "pipeline_fps", "pipeline_processing_ms_per_frame",
 ]
 
@@ -1140,6 +1280,15 @@ def main(argv=None):
     parser.add_argument("--ffmpeg", help="FFmpeg executable; otherwise discover on PATH or in this virtual environment.")
     parser.add_argument("--ffprobe", help="FFprobe executable; otherwise discover on PATH or in this virtual environment.")
     parser.add_argument("--no-plots", action="store_true", help="Export metrics without generating figures.")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto",
+                        help="Pixel metrics backend; auto uses CUDA when available, otherwise threaded CPU. "
+                             "VMAF and decoding remain on CPU.")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="Concurrent pixel-metric frames; 0 auto-selects up to 8 using CPU/RAM, 1 runs serially.")
+    parser.add_argument("--vmaf-threads", type=int, default=0,
+                        help="VMAF worker threads; 0 uses up to 8 available CPUs. All frames are scored.")
+    parser.add_argument("--decoder-threads", type=int, default=2,
+                        help="Threads per video decoder (default: 2).")
     parser.add_argument("--plot-frames", type=int, nargs="+",
                         help="Zero-based spatial example frames; otherwise each clip's plot_frames or midpoint.")
     add_statistics_arguments(parser)
@@ -1147,6 +1296,8 @@ def main(argv=None):
     args.out_dir = args.out_dir or args.manifest.resolve().parent / "compression_evaluation"
     try:
         validate_statistics(args.bootstrap_samples, args.confidence)
+        if args.workers < 0 or args.vmaf_threads < 0 or args.decoder_threads < 1:
+            raise ValueError("--workers/--vmaf-threads must be nonnegative; --decoder-threads must be positive")
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -1220,7 +1371,9 @@ def main(argv=None):
                 # All methods must be evaluated on the canonical clip-level ROI.
                 res = evaluate_variant(clip_name, ref_path, variant, roi_source,
                                         roi_percentile, vmaf_model_path, args.out_dir,
-                                        manifest_dir=manifest_dir)
+                                        manifest_dir=manifest_dir, workers=args.workers,
+                                        vmaf_threads=args.vmaf_threads, decoder_threads=args.decoder_threads,
+                                        device=args.device)
                 all_results.append(res)
                 coverage.append(dict(video=clip_name, method=res.method, label=res.label,
                                      status="scored" if res.frames_evaluated > 0 else "failed", notes=res.notes))
@@ -1275,6 +1428,11 @@ def main(argv=None):
                     "vmaf_model": vmaf_model_path or "version=vmaf_v0.6.1",
                     "ffmpeg": FFMPEG_BIN,
                     "ffprobe": FFPROBE_BIN,
+                    "evaluation_execution": {"device": args.device,
+                                             "ssim_precision": "IEEE float32; CPU/CUDA convolution order can differ slightly",
+                                             "workers": args.workers, "auto_worker_limit": 8,
+                                             "vmaf_threads": args.vmaf_threads or min(8, available_cpus()),
+                                             "decoder_threads": args.decoder_threads},
                     "timing": "offline sequential processing throughput; not measured capture-to-display latency",
                     "unavailable": "null; infinite PSNR is represented as the string Infinity",
                 },

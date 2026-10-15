@@ -26,6 +26,8 @@ else:
     from workflow import encode_video, prepare_qp_maps, select_encoder, validate_qp_maps, video_info
     from baseline_qp_generator import generate_maps
 
+from gaze_preprocessing import add_preprocessing_argument
+
 
 def relative_path(path, directory):
     path = Path(path).resolve()
@@ -57,6 +59,7 @@ def main(argv=None):
     parser.add_argument('--encoder', type=Path)
     parser.add_argument('--compiler')
     parser.add_argument('--checkpoint', type=Path)
+    add_preprocessing_argument(parser)
     args = parser.parse_args(argv)
     if any(not math.isfinite(v) or not 0 <= v <= 51 for v in args.crfs):
         parser.error('CRFs must be finite and between 0 and 51')
@@ -128,7 +131,7 @@ def sweep_clip(args, video, output, gaze_maps, env, encoder, variant_paths, roi_
     if 'gaze' in args.methods:
         maps['gaze'] = gaze_maps
         generation_times['gaze'] = prepare_qp_maps(video, gaze_maps, args.reuse_qp, env,
-            args.qp_min, args.qp_max, args.spatial_sigma, args.temporal_alpha, args.checkpoint)
+            args.qp_min, args.qp_max, args.spatial_sigma, args.temporal_alpha, args.checkpoint, args.preprocessing)
     for method in args.methods:
         if method in ('center', 'motion', 'static_saliency'):
             maps[method] = output / '_work' / video_id(video) / f'qp_{method}'
@@ -153,7 +156,7 @@ def sweep_clip(args, video, output, gaze_maps, env, encoder, variant_paths, roi_
                 variants.append(variant)
     roi_source = roi_override or gaze_maps
     manifest = dict(roi_percentile=25, protocol=dict(preset=args.preset, qp_min=args.qp_min,
-        dt_policy=DT_POLICY,
+        dt_policy=DT_POLICY, requested_preprocessing=args.preprocessing,
         qp_max=args.qp_max, spatial_sigma=args.spatial_sigma, temporal_alpha=args.temporal_alpha,
         center_sigma=args.center_sigma, roi='one shared scoring mask for every method'), clips=[dict(
         name=video.name, reference=relative_path(video, output), roi_source=relative_path(roi_source, output),

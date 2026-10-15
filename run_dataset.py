@@ -6,6 +6,8 @@ from pathlib import Path
 from project_paths import INPUT_VIDEO_DIR, OUTPUT_FILE_DIR, discover_videos
 from dataset_evaluation import add_statistics_arguments, validate_statistics
 
+from gaze_preprocessing import add_preprocessing_argument
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -21,13 +23,14 @@ def main(argv=None):
     parser.add_argument('--methods', nargs='+', choices=['uniform', 'gaze', 'center', 'motion', 'static_saliency'],
                         default=['uniform', 'gaze'])
     parser.add_argument('--targets-dir', type=Path, help='Aligned gaze NPZs named <video stem>.npz')
-    parser.add_argument('--target-start-index', type=int, default=0)
+    parser.add_argument('--target-start-index', type=int, default=None)
     parser.add_argument('--split', choices=['train', 'val', 'test'], default='test')
     parser.add_argument('--split-manifest', type=Path)
     parser.add_argument('--no-split-check', action='store_true')
     parser.add_argument('--allow-unverified-checkpoint', action='store_true')
     parser.add_argument('--no-plots', action='store_true')
     add_statistics_arguments(parser)
+    add_preprocessing_argument(parser)
     args = parser.parse_args(argv)
     args.input_dir = args.input_dir.expanduser().resolve()
     args.output_dir = args.output_dir.expanduser().resolve()
@@ -52,6 +55,8 @@ def main(argv=None):
     encoding = ['--preset', args.preset]
     if args.checkpoint:
         encoding += ['--checkpoint', str(args.checkpoint)]
+    if args.preprocessing:
+        encoding += ['--preprocessing', args.preprocessing]
     if args.reuse_qp:
         encoding += ['--reuse-qp']
     statistics = ['--bootstrap-samples', str(args.bootstrap_samples), '--confidence', str(args.confidence),
@@ -70,9 +75,13 @@ def main(argv=None):
     if 'gaze' in args.tasks:
         from Baselines.evaluate_gaze import main as gaze
         command = ['--input-dir', str(args.input_dir), '--out-dir', str(args.output_dir / 'gaze_evaluation'),
-                   '--target-start-index', str(args.target_start_index), '--split', args.split, *statistics,
+                   '--split', args.split, *statistics,
                    '--methods', *[m for m in args.methods if m != 'gaze']]
+        if args.target_start_index is not None:
+            command += ['--target-start-index', str(args.target_start_index)]
         # Gaze is selected through a checkpoint; controls are the other methods.
+        if args.preprocessing:
+            command += ['--preprocessing', args.preprocessing]
         if 'gaze' in args.methods:
             command += ['--checkpoint', str(args.checkpoint)]
         for option in ('targets_dir', 'split_manifest'):

@@ -17,6 +17,8 @@ from project_paths import (STATIC_SALIENCY_CHECKPOINT, INPUT_VIDEO_DIR, OUTPUT_F
 from dataset_evaluation import (add_statistics_arguments, validate_statistics, aggregate_records,
                                 paired_comparisons, statistics_protocol, write_dataset_report)
 from video_timing import DT_POLICY, frame_interval
+from gaze_preprocessing import add_preprocessing_argument, resolve_checkpoint_preprocessing, preprocessing_spec
+from DIEM.frame_integrity import read_target_alignment
 from DIEM import config as diem_config
 from DIEM.splits import membership, verify_checkpoint, read_manifest, file_sha256
 
@@ -84,7 +86,7 @@ def score_sequences(sequences, targets, valid):
 
 
 def frame_sequences(video, shape, methods, center_sigma, spatial_sigma, temporal_alpha, checkpoint=None, frames=None,
-                    static_checkpoint=STATIC_SALIENCY_CHECKPOINT):
+                    static_checkpoint=STATIC_SALIENCY_CHECKPOINT, preprocessing=None):
     import cv2
     controls = {m: FrameControl(m, shape, center_sigma, spatial_sigma, temporal_alpha) for m in methods if m != "static_saliency"}
     if "static_saliency" in methods:
@@ -114,7 +116,7 @@ def frame_sequences(video, shape, methods, center_sigma, spatial_sigma, temporal
             for method, control in controls.items():
                 output[method].append(control(frame))
             if checkpoint is not None:
-                hm = apply_spatial_smoothing(call_model(frame, checkpoint_path=checkpoint, dt=frame_interval(fps)), spatial_sigma)
+                hm = apply_spatial_smoothing(call_model(frame, checkpoint_path=checkpoint, dt=frame_interval(fps), preprocessing=preprocessing), spatial_sigma)
                 raw = hm.squeeze(0).numpy()
                 if raw.shape != shape:
                     raise ValueError(f"Model grid {raw.shape} does not match targets {shape}")
@@ -135,8 +137,8 @@ def fingerprint(path):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--targets", type=Path, help="Aligned DIEM NPZ with heatmaps and valid")
-    parser.add_argument("--target-start-index", type=int, default=0,
-                        help="First target corresponding to video frame zero; use 1 for DIEM build_heatmaps.py output")
+    parser.add_argument("--target-start-index", type=int, default=None,
+                        help="First target for the first decoded video frame; automatic from DIEM metadata, otherwise legacy default 0")
     parser.add_argument("--frames", type=int, help="Explicit prefix length for a smoke run; default: entire aligned sequence")
     parser.add_argument("--video", type=Path, help="Source video, exactly one frame per target heatmap")
     inputs = parser.add_mutually_exclusive_group()
@@ -160,6 +162,7 @@ def main(argv=None):
     parser.add_argument("--targets-dir", type=Path, default=diem_config.OUTPUT_ROOT / "heatmaps",
                         help="Dataset targets named <video stem>.npz")
     parser.add_argument("--dataset-manifest", type=Path, help="JSON clips with name, video, targets, optional predictions/video_name/target_start_index/frames; paths relative to JSON")
+    add_preprocessing_argument(parser)
     add_statistics_arguments(parser)
     args = parser.parse_args(argv)
     try:
@@ -172,7 +175,7 @@ def main(argv=None):
         parser.exit(1, f"Gaze dataset evaluation failed: {exc}\n")
     if len(set(args.methods)) != len(args.methods):
         parser.error("Methods must be unique")
-    if args.target_start_index < 0 or (args.frames is not None and args.frames <= 0):
+    if (args.target_start_index is not None and args.target_start_index < 0) or (args.frames is not None and args.frames <= 0):
         parser.error("Target start index must be nonnegative and frames must be positive")
     if (any(m in args.methods for m in ("motion", "static_saliency")) or args.checkpoint) and not args.video:
         parser.error("Motion and trained model inference require --video")
@@ -198,23 +201,42 @@ def main(argv=None):
         targets, valid = load_targets(args.targets)
         with np.load(args.targets, allow_pickle=False) as target_file:
             target_fps = args.target_fps if args.target_fps is not None else float(target_file["fps"]) if "fps" in target_file else diem_config.GAZE_FPS
+            alignment_record = read_target_alignment(target_file) if "alignment_json" in target_file or "frame_numbers" in target_file else None
+            if alignment_record and not np.isclose(target_fps, alignment_record["fps"], rtol=1e-4):
+                raise ValueError("Target FPS override differs from recorded frame mapping")
+        if args.target_start_index is None:
+            args.target_start_index = 1 if alignment_record else 0
+        if alignment_record and args.target_start_index != 1:
+            raise ValueError("DIEM source frame 1 maps to target index 1; selected target offset differs")
+        alignment = dict(source_frame_mapping_verified=False, timestamp_alignment_verified=False,
+                         target_mapping="recorded_1_based_frame_numbers" if alignment_record else "caller_supplied_unverified",
+                         note="Frame numbers, source identity, counts and nominal FPS do not prove gaze-clock synchronization")
         frame_interval(target_fps)
         video_fps = None
         if args.video:
             from Encoder.workflow import video_info
-            video_fps = video_info(args.video)[3]
+            video_count, _, _, video_fps = video_info(args.video)
+            if alignment_record:
+                if file_sha256(args.video) != alignment_record["source_sha256"] or video_count != alignment_record["source_frame_count"]:
+                    raise ValueError("Target source hash/frame count differs from supplied video")
+                alignment["source_frame_mapping_verified"] = True
             if not np.isclose(video_fps, target_fps, rtol=1e-4):
                 raise ValueError("Source FPS and annotation FPS differ; align them before gaze evaluation")
         stop = args.target_start_index + args.frames if args.frames is not None else len(targets)
         if args.target_start_index >= len(targets) or stop > len(targets):
             raise ValueError("Requested target interval exceeds the annotation sequence")
         targets, valid = targets[args.target_start_index:stop], valid[args.target_start_index:stop]
+        if args.video and len(targets) != (args.frames if args.frames is not None else video_count):
+            raise ValueError("Selected source/target frame counts differ; explicit alignment is required")
+        if args.video and args.frames is not None and args.frames > video_count:
+            raise ValueError("Requested prefix exceeds source frame count")
         if not valid.any():
             raise ValueError("Requested target interval has no valid frames")
+        inference_preprocessing = resolve_checkpoint_preprocessing(args.checkpoint, args.preprocessing) if args.checkpoint else None
         start = time.perf_counter()
         if args.video:
             sequences = frame_sequences(args.video, targets.shape[1:], args.methods, args.center_sigma,
-                                         args.spatial_sigma, args.temporal_alpha, args.checkpoint, args.frames, args.static_checkpoint)
+                                         args.spatial_sigma, args.temporal_alpha, args.checkpoint, args.frames, args.static_checkpoint, args.preprocessing)
         else:
             sequences = {m: np.repeat(FrameControl(m, targets.shape[1:], args.center_sigma,
                 args.spatial_sigma, args.temporal_alpha)()[None], len(targets), axis=0) for m in args.methods}
@@ -222,6 +244,28 @@ def main(argv=None):
             with np.load(args.predictions, allow_pickle=False) as data:
                 predictions = np.asarray(data["heatmaps"], dtype=np.float32)
                 prediction_info = json.loads(str(data["provenance_json"])) if "provenance_json" in data else None
+            saved_preprocessing = (prediction_info or {}).get("input_preprocessing")
+            if saved_preprocessing:
+                expected = preprocessing_spec(saved_preprocessing.get("image_size", (256, 384)), saved_preprocessing.get("profile"))
+                if saved_preprocessing != expected or (args.preprocessing is not None and args.preprocessing != saved_preprocessing["profile"]):
+                    raise ValueError("Saved predictions use incompatible preprocessing; regenerate with the intended profile")
+                training_spec = ((prediction_info or {}).get("training_record") or {}).get("input_preprocessing")
+                if training_spec and training_spec != saved_preprocessing:
+                    raise ValueError("Saved prediction preprocessing differs from checkpoint training")
+                inference_preprocessing = dict(spec=saved_preprocessing, training_policy_verified=training_spec == saved_preprocessing,
+                                               selection="saved_predictions", note=None)
+            else:
+                if args.preprocessing is not None:
+                    raise ValueError("Saved predictions have no preprocessing declaration; a CLI flag cannot retroactively establish their pixel contract")
+                inference_preprocessing = dict(spec=None, training_policy_verified=False, selection="unknown_saved_predictions",
+                                               note="Historical prediction preprocessing was not recorded")
+            if prediction_info and prediction_info.get("alignment_binding"):
+                binding = prediction_info["alignment_binding"]
+                if binding.get("targets_sha256") != file_sha256(args.targets) or binding.get("target_start_index") != args.target_start_index or \
+                        (args.video and binding.get("source_sha256") != file_sha256(args.video)):
+                    raise ValueError("Saved predictions refer to different targets/source/frame offset")
+            elif alignment_record:
+                raise ValueError("Saved predictions lack source/target frame mapping; regenerate them")
             try:
                 if not prediction_info or prediction_info.get("dt_policy") != DT_POLICY or \
                         prediction_info.get("video_name") != video_name or \
@@ -273,9 +317,10 @@ def main(argv=None):
                 cc="undefined for constant maps; null with explicit count",
                 temporal="lag: previous prediction, uniform initial map; static: first prediction; shifted: seeded nonzero circular shift, offline diagnostic",
                 dt_policy=DT_POLICY, fps=video_fps or target_fps, dt_seconds=frame_interval(video_fps or target_fps),
+                input_preprocessing=inference_preprocessing,
                 split=split_info, held_out_verified=held_out_verified, checkpoint_provenance_note=checkpoint_note,
                 static_saliency="DeepGazeI, trained MIT1003 weights, uniform center prior, independent frames, no EMA" if "static_saliency" in args.methods else None,
-                alignment="caller supplies exact temporal alignment; frame-count/grid mismatch is rejected"))
+                alignment=alignment))
         (args.out_dir / "results.json").write_text(json.dumps(results, indent=2, allow_nan=False), encoding="utf-8")
         lines = ["# Gaze heatmap controls", "", "Scores use measured gaze heatmaps and the same valid frames for every method.", "",
                  "| Method | Frames | KL(GT‖prediction) ↓ | Similarity ↑ | CC ↑ | Centroid error (grid pixels) ↓ |",
@@ -289,12 +334,16 @@ def main(argv=None):
                   f"Held-out provenance verified: {held_out_verified}. Partition: {split_info['partition']}. Per-video scores; dataset runs pool these in dataset_report.md.",
                   f"Checkpoint/prediction provenance note: {checkpoint_note or 'none'}",
                   "Historical weights without a matching training record are diagnostics, not proven held-out results.",
+                  f"Gaze input preprocessing: {inference_preprocessing or 'no learned gaze input'}. Split verification does not establish historical pixel-preprocessing consistency.",
+                  f"Frame mapping: {alignment}. External gaze timestamp synchronization is unverified.",
                   "Alignment, hashes and metric definitions are recorded in results.json."]
         (args.out_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         if args.checkpoint:
             training_path = Path(str(args.checkpoint) + ".training.json")
             prediction_info = dict(dt_policy=DT_POLICY, fps=video_fps, video_name=video_name,
-                checkpoint_sha256=provenance["checkpoint"]["sha256"],
+                alignment_binding=dict(targets_sha256=provenance["targets"]["sha256"], source_sha256=provenance["video"]["sha256"],
+                    target_start_index=args.target_start_index),
+                checkpoint_sha256=provenance["checkpoint"]["sha256"], input_preprocessing=inference_preprocessing["spec"],
                 training_record=json.loads(training_path.read_text()) if training_path.is_file() else None)
             np.savez_compressed(args.out_dir / "predictions.npz", heatmaps=sequences["gaze"],
                                 provenance_json=json.dumps(prediction_info))
@@ -348,11 +397,15 @@ def evaluate_dataset(args):
     for clip in clips:
         folder = args.out_dir / "per_video" / video_id(clip["name"])
         command = ["--targets", str(clip["targets"]), "--out-dir", str(folder),
-                   "--target-start-index", str(clip.get("target_start_index", args.target_start_index)),
                    "--center-sigma", str(args.center_sigma), "--spatial-sigma", str(args.spatial_sigma),
                    "--temporal-alpha", str(args.temporal_alpha), "--seed", str(args.seed),
                    "--split-manifest", str(args.split_manifest), "--split", args.split,
                    "--static-checkpoint", str(args.static_checkpoint), "--methods", *args.methods]
+        offset = clip.get("target_start_index", args.target_start_index)
+        if offset is not None:
+            command += ["--target-start-index", str(offset)]
+        if args.preprocessing is not None:
+            command += ["--preprocessing", args.preprocessing]
         for key in ("video", "predictions"):
             if clip.get(key):
                 command += ["--" + key, str(clip[key])]

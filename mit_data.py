@@ -8,7 +8,8 @@ import scipy.io as sio
 from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
-from torchvision import transforms
+from gaze_preprocessing import GazePreprocessor
+from checkpoint_provenance import fingerprint
 from OSIE_Modeldata import _gaussian_heatmap, _pad_or_truncate, extract_scanpaths, OSIEDataset
 
 class MITDataset(Dataset):
@@ -35,12 +36,23 @@ class MITDataset(Dataset):
         df = pd.read_csv(manifest_path)
 
         self.samples = []
+        self.provenance = dict(dataset="MIT", format="manifest", data_root=str(Path(data_root).resolve()),
+            manifest=fingerprint(manifest_path), annotation_sources=[], excluded_files=[],
+            parameters=dict(img_size=list(img_size), downsample=downsample, min_len=min_len,
+                            max_len=max_len, sigma=sigma, seed=seed),
+            subject_partition="equal contiguous blocks; trailing remainder unused",
+            fixation_extraction="median step <5px selects raw gaze; saccade threshold 20px",
+            time_policy="first fixation dt=0; remaining fixations dt=1 deployment steps")
+        seen_sources = set()
 
         for _, row in df.iterrows():
             img_name = os.path.basename(row['image_path'])
             npy_path = os.path.join(data_root, row['fixation_npy_path'])
             num_subjects = int(row['num_subjects'])
             try:
+                if npy_path not in seen_sources:
+                    self.provenance["annotation_sources"].append(fingerprint(npy_path))
+                    seen_sources.add(npy_path)
                 fix_data = np.load(npy_path, allow_pickle=True)
 
                 # fix_data is (N, 2) with ALL subjects' gaze data concatenated.
@@ -73,6 +85,7 @@ class MITDataset(Dataset):
 
                     self.samples.append({
                         'img_name': img_name,
+                        'subject_index': s,
                         'fix_x':    xs,
                         'fix_y':    ys,
                         'fix_dt':   dts,
@@ -80,15 +93,13 @@ class MITDataset(Dataset):
                     })
             except Exception as e:
                 print(f"Skipping {npy_path}: {e}")
+                self.provenance["excluded_files"].append(dict(path=npy_path, reason=str(e)))
 
         if len(self.samples) == 0:
             raise ValueError("No scanpaths were loaded! The structure of fix_data does not match expectations.")
 
-        self.transform = transforms.Compose([
-            transforms.Resize(img_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+        self.transform = GazePreprocessor(img_size)
+        self.input_preprocessing = self.transform.spec
         print(f"[MITDataset] Loaded {len(self.samples)} scanpath pairs.")
 
     def __len__(self):
@@ -193,9 +204,13 @@ class MITMatDataset(OSIEDataset):
         self.samples = [sample for entry in entries for sample in extract_scanpaths(entry, min_len, max_len)]
         if not self.samples:
             raise ValueError("No MIT MAT scanpaths loaded")
-        self.transform = transforms.Compose([
-            transforms.Resize(img_size), transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+        self.transform = GazePreprocessor(img_size)
+        self.input_preprocessing = self.transform.spec
+        self.provenance = dict(dataset="MIT", format="mat", data_root=str(Path(data_root).resolve()),
+            annotations=fingerprint(Path(data_root) / "eye/fixations.mat"),
+            parameters=dict(img_size=list(img_size), downsample=downsample, min_len=min_len,
+                            max_len=max_len, sigma=sigma, seed=seed),
+            time_policy="raw fixation duration values from MAT, milliseconds")
 
 
 def build_mit_dataloader(data_root, batch_size=8, num_workers=0, dataset_format="manifest", limit_samples=None, **dataset_options):

@@ -12,6 +12,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 from video_timing import DT_POLICY, frame_interval
 from project_paths import DIEM_CHECKPOINT, file_sha256
+from gaze_preprocessing import resolve_checkpoint_preprocessing, preprocessing_implementation_sha256
 
 if __package__:
     from .build import WORK_DIR, build_encoder, encoder_path, is_current_encoder
@@ -74,7 +75,7 @@ def validate_qp_maps(video, qp_dir):
 
 
 def prepare_qp_maps(video, qp_dir, reuse=False, env=None, qp_min=-3, qp_max=10,
-                    spatial_sigma=1.5, temporal_alpha=1, checkpoint=None):
+                    spatial_sigma=1.5, temporal_alpha=1, checkpoint=None, preprocessing=None):
     if reuse:
         validate_qp_maps(video, qp_dir)
         metadata = json.loads((Path(qp_dir) / "metadata.json").read_text())
@@ -82,6 +83,10 @@ def prepare_qp_maps(video, qp_dir, reuse=False, env=None, qp_min=-3, qp_max=10,
                         qp_min=qp_min, qp_max=qp_max, spatial_sigma=spatial_sigma, temporal_alpha=temporal_alpha)
         if any(metadata.get(key) != value for key, value in expected.items()):
             raise RuntimeError("Cached gaze maps do not match source content/checkpoint/settings. Regenerate without --reuse-qp.")
+        expected_preprocessing = resolve_checkpoint_preprocessing(checkpoint or DIEM_CHECKPOINT, preprocessing)
+        if metadata.get("input_preprocessing") != expected_preprocessing["spec"] or \
+                metadata.get("preprocessing_implementation_sha256") != preprocessing_implementation_sha256():
+            raise RuntimeError("Cached gaze maps use a different/unknown preprocessing policy. Regenerate without --reuse-qp.")
         fps = video_info(video)[3]
         if metadata.get("dt_policy") != DT_POLICY or abs(metadata.get("dt_seconds", -1) - frame_interval(fps)) > 1e-9:
             raise RuntimeError("Cached gaze maps use an unknown/old time convention. Regenerate without --reuse-qp.")
@@ -93,6 +98,8 @@ def prepare_qp_maps(video, qp_dir, reuse=False, env=None, qp_min=-3, qp_max=10,
              "--spatial_sigma", spatial_sigma, "--temporal_alpha", temporal_alpha]
     if checkpoint is not None:
         command += ["--checkpoint", Path(checkpoint).resolve()]
+    if preprocessing is not None:
+        command += ["--preprocessing", preprocessing]
     run_cmd(command, env)
     duration = time.perf_counter() - start
     validate_qp_maps(video, qp_dir)

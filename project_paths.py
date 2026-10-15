@@ -16,7 +16,7 @@ STATIC_SALIENCY_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "deepgaze1.pth"
 # Shared by every video entry point. Overrides are useful for mounted datasets.
 INPUT_VIDEO_DIR = Path(os.environ.get("GAZELNN_INPUT_DIR", PROJECT_ROOT / "input video")).expanduser().resolve()
 OUTPUT_FILE_DIR = Path(os.environ.get("GAZELNN_OUTPUT_DIR", PROJECT_ROOT / "output file")).expanduser().resolve()
-VIDEO_EXTENSIONS = frozenset({".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".mpg", ".mpeg", ".wmv"})
+VIDEO_EXTENSIONS = frozenset({".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".mpg", ".mpeg", ".wmv", ".y4m"})
 
 
 def file_sha256(path):

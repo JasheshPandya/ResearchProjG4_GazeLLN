@@ -11,6 +11,9 @@ import torch.nn.functional as F
 import torchvision.models as models
 import pytorch_lightning as pl
 from ncps.torch import CfCCell
+from checkpoint_provenance import checkpoint_initialization, read_training_record
+
+ARCHITECTURE_VERSION = "gazelnn_coordconv_in_out_v1"
 
 
 def load_model_weights(model, checkpoint, device="cpu"):
@@ -18,17 +21,32 @@ def load_model_weights(model, checkpoint, device="cpu"):
     checkpoint = Path(checkpoint).expanduser().resolve()
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
+    initialization = checkpoint_initialization(checkpoint)
     state = torch.load(checkpoint, map_location=device, weights_only=True)
     if not isinstance(state, dict) or not all(
         name in state for name in ("coordconv_in.conv.weight", "coordconv_out.conv.weight")
     ):
         raise ValueError("Checkpoint must contain both input and output CoordConv weights for gaze_model.GazeLLNArch")
     model.load_state_dict(state, strict=True)
+    model._initialization_provenance = initialization
     return model
 
 
 def load_gaze_model(checkpoint, device="cpu", **architecture):
     """Load complete trained weights without downloading backbone initialization."""
+    try:
+        record = read_training_record(checkpoint)
+    except ValueError:
+        record = None  # use explicit/default topology for unverified weights
+    recorded = record.get("architecture") if record else None
+    if recorded:
+        if recorded["name"] != "gaze_model.GazeLLNArch" or recorded["version"] != ARCHITECTURE_VERSION:
+            raise ValueError("Checkpoint records an unsupported GazeLNN architecture/version")
+        constructor = dict(recorded["constructor"])
+        if any(key in constructor and value != constructor[key] for key, value in architecture.items()):
+            raise ValueError("Explicit architecture differs from checkpoint training provenance")
+        architecture = dict(constructor, **architecture)
+    architecture.pop("pretrained_backbone", None)
     model = GazeLLNArch(pretrained_backbone=False, **architecture).to(device)
     return load_model_weights(model, checkpoint, device)
 
@@ -52,11 +70,18 @@ class CoordConv(nn.Module):
 
 class GazeLLNArch(pl.LightningModule):
 
+    ARCHITECTURE_VERSION = ARCHITECTURE_VERSION
+
     def __init__(self, image_h: int = 256, image_w: int = 384, S: int = 8,
                  hidden_size: int = 512, backbone_units: int = 1024, pretrained_backbone: bool = True):
         super().__init__()
 
         self.save_hyperparameters()
+        self._initialization_provenance = dict(
+            kind="torchvision_imagenet_backbone_and_random_head" if pretrained_backbone else "random_parameters",
+            backbone="torchvision.models.mobilenet_v3_large",
+            backbone_weights="MobileNet_V3_Large_Weights.IMAGENET1K_V2" if pretrained_backbone else None,
+            torch_initial_seed=torch.initial_seed(), optimizer_restored=False)
 
 
         self.hmap_h = self.hparams.image_h // self.hparams.S
@@ -90,7 +115,12 @@ class GazeLLNArch(pl.LightningModule):
         self.project = nn.Linear(self.hparams.hidden_size, self.hmap_feature_size)
 
     def extract_features(self, x):
-        """Extracts and caches visual features using the MobileNet backbone."""
+        """Extract MobileNet features from already preprocessed BCHW tensors.
+
+        Use gaze_preprocessing.GazePreprocessor (or DIEMWindowDataset) first.
+        Scaling and channel normalization happen outside the model, once, using
+        the checkpoint's declared input profile; this method never repeats them.
+        """
         x = self.feature_extractor(x)
         x = self.pool(x)
         x = torch.flatten(x, 1)  # Flattens to (B, 960)

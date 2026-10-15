@@ -17,12 +17,13 @@ from scipy.ndimage import gaussian_filter
 import torch
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
+from gaze_preprocessing import GazePreprocessor, training_preprocessing
 from tqdm import tqdm
 
 from project_paths import OSIE_CHECKPOINT
 from gaze_model import GazeLLNArch, CoordConv, load_model_weights
 from gaze_losses import KLDTWLoss, _cost_matrix, soft_dtw
+from checkpoint_provenance import TrainingRecorder, osie_loader_record, loader_record, fingerprint
 
 def _gaussian_heatmap(
     x: float,
@@ -119,7 +120,7 @@ def extract_scanpaths(
     scanpaths = []
     img_name = entry['img']
 
-    for subj in entry['subjects']:
+    for subject_index, subj in enumerate(entry['subjects']):
         xs  = np.atleast_1d(np.array(subj['fix_x'],        dtype=np.float32)).tolist()
         ys  = np.atleast_1d(np.array(subj['fix_y'],        dtype=np.float32)).tolist()
         dts = np.atleast_1d(np.array(subj['fix_duration'], dtype=np.float32)).tolist()
@@ -133,6 +134,7 @@ def extract_scanpaths(
 
         scanpaths.append({
             'img_name': img_name,
+            'subject_index': subject_index,
             'fix_x':    xs,
             'fix_y':    ys,
             'fix_dt':   dts,
@@ -203,6 +205,14 @@ class OSIEDataset(Dataset):
         else:
             chosen = indices[n_train + n_val:]
 
+        self.provenance = dict(dataset="OSIE", split=split, split_unit="image", seed=seed,
+            assignment="Python random.Random(seed).shuffle over fixation MAT entry order; 80/10/10",
+            data_root=str(Path(data_root).expanduser().resolve()), annotations=fingerprint(mat_path),
+            image_indices=chosen, images=[str(all_entries[i]['img']) for i in chosen],
+            preprocessing=dict(img_size=list(img_size), downsample=downsample, min_len=min_len,
+                max_len=max_len, gaussian_sigma=sigma, input="RGB scaled to [0,1], ImageNet mean/std normalization",
+                time_policy="raw fixation duration values from MAT, milliseconds"))
+
         # ---- flatten to (image, subject) scanpath pairs --------------------
         self.samples: List[Dict] = []
         for idx in chosen:
@@ -211,14 +221,9 @@ class OSIEDataset(Dataset):
             self.samples.extend(scanpaths)
 
         # ---- image transforms ----------------------------------------------
-        self.transform = transforms.Compose([
-            transforms.Resize(img_size),          # PIL Resize takes (H, W)
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],       # ImageNet stats
-                std =[0.229, 0.224, 0.225],
-            ),
-        ])
+        self.transform = GazePreprocessor(img_size)
+        self.input_preprocessing = self.transform.spec
+        self.provenance['preprocessing']['input'] = self.input_preprocessing
 
         print(
             f"[OSIEDataset] split={split:5s} | "
@@ -339,6 +344,9 @@ def train_epoch(model, loader, optimizer, criterion, device):
         avg_loss : float — mean loss over all batches
     """
     model.train()
+    # no_grad() alone does not freeze BatchNorm buffers or disable dropout.
+    model.feature_extractor.requires_grad_(False)
+    model.feature_extractor.eval()
     total_loss = 0.0
 
     # Adds a progress bar to see the batches processing
@@ -460,6 +468,9 @@ def train(
     patience:    int   = 20,
     gamma:       float = 0.1,
     checkpoint:  str   = OSIE_CHECKPOINT,
+    initialization=None,
+    run_settings=None,
+    test_loader=None,
 ):
     """
     Full training loop with Adam optimiser, KL-DTW loss, and early stopping.
@@ -481,8 +492,33 @@ def train(
     checkpoint = Path(checkpoint).expanduser().resolve()
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     model     = model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    model.feature_extractor.requires_grad_(False)
+    model.feature_extractor.eval()
+
+    optimizer = optim.Adam(
+        (p for p in model.parameters() if p.requires_grad),
+        lr=lr,
+        weight_decay=1e-4,
+    )    
+    
     criterion = KLDTWLoss(gamma=gamma)
+    split_records = {"train": osie_loader_record(train_loader), "val": osie_loader_record(val_loader)}
+    if test_loader is not None:
+        split_records["test"] = osie_loader_record(test_loader)
+    recorder = TrainingRecorder(model, checkpoint, dataset="OSIE", splits=split_records,
+        initialization=initialization, input_preprocessing=training_preprocessing(train_loader, val_loader, model),
+        hyperparameters=dict(epochs=epochs, lr=lr, patience=patience, gamma=gamma, device=str(device),
+            optimizer=dict(name="torch.optim.Adam", defaults=optimizer.defaults),
+            loss=dict(name="gaze_losses.KLDTWLoss", gamma=gamma, eps=criterion.eps,
+                      mask_policy=criterion.mask_policy),
+            gradient_clip_norm=1.0, backbone_gradients=False,
+            backbone_buffers="feature_extractor.eval(); BatchNorm running statistics frozen",
+            feedback="autoregressive detached previous prediction; recurrent state resets per batch",
+            initial_heatmap="center Gaussian, sigma=1.5 grid pixels", run_settings=run_settings,
+            train_loader=loader_record(train_loader), val_loader=loader_record(val_loader)),
+        sources=[Path(__file__), Path(__file__).with_name("gaze_model.py"),
+                 Path(__file__).with_name("gaze_losses.py"), Path(__file__).with_name("trainGazeLNN.py"),
+                 Path(__file__).with_name("checkpoint_provenance.py"), Path(__file__).with_name("gaze_preprocessing.py")])
 
     best_val_loss    = float('inf')
     epochs_no_improve = 0
@@ -490,40 +526,45 @@ def train(
 
     print(f"Training on {device} | epochs={epochs} | lr={lr} | patience={patience}\n")
 
-    for epoch in range(1, epochs + 1):
+    with recorder.run():
+        for epoch in range(1, epochs + 1):
 
-        start_time = time.time()
+            start_time = time.time()
 
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss   = eval_epoch(model, val_loader,   criterion, device)
+            train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+            val_loss   = eval_epoch(model, val_loader,   criterion, device)
 
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        mins = int(elapsed_time // 60)
-        secs = int(elapsed_time % 60)
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            recorder.epoch(epoch, train_loss, val_loss, elapsed_time, learning_rates=[group["lr"] for group in optimizer.param_groups])
+            mins = int(elapsed_time // 60)
+            secs = int(elapsed_time % 60)
 
-        history['train_loss'].append(train_loss)
-        history['val_loss'].append(val_loss)
+            history['train_loss'].append(train_loss)
+            history['val_loss'].append(val_loss)
 
-        print(f"Epoch {epoch:03d}/{epochs} | time={mins}m {secs:02d}s | train={train_loss:.4f} | val={val_loss:.4f}", end="")
+            print(f"Epoch {epoch:03d}/{epochs} | time={mins}m {secs:02d}s | train={train_loss:.4f} | val={val_loss:.4f}", end="")
 
-        # ---- check for improvement ----------------------------------------
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            epochs_no_improve = 0
-            torch.save(model.state_dict(), checkpoint)
-            print("  ← saved best model", end="")
-        else:
-            epochs_no_improve += 1
-            print(f"  (no improvement for {epochs_no_improve}/{patience} epochs)", end="")
+            # ---- check for improvement ----------------------------------------
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                epochs_no_improve = 0
+                recorder.save_best(model)
+                print("  ← saved best model", end="")
+            else:
+                epochs_no_improve += 1
+                print(f"  (no improvement for {epochs_no_improve}/{patience} epochs)", end="")
 
-        print()
+            print()
 
-        # ---- early stopping -----------------------------------------------
-        if epochs_no_improve >= patience:
-            print(f"\nEarly stopping triggered at epoch {epoch}.")
-            print(f"Best val loss: {best_val_loss:.4f}")
-            break
+            # ---- early stopping -----------------------------------------------
+            recorder.update()
+
+            if epochs_no_improve >= patience:
+                recorder.record["status"] = "early_stopped"
+                print(f"\nEarly stopping triggered at epoch {epoch}.")
+                print(f"Best val loss: {best_val_loss:.4f}")
+                break
 
     print("\nTraining complete.")
     print(f"Best model saved to: {checkpoint}")

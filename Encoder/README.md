@@ -1,6 +1,6 @@
 # Running on Windows, Linux and macOS
 
-The encoder uses native GCC/Clang, FFmpeg development libraries, x264 and `pkg-config`. Python scripts discover tools on PATH and use the same build helper. Pipelines reuse a local encoder only when its build record matches the current C source, OS and CPU architecture; changed source triggers a rebuild. Binaries must be built separately for each OS and CPU architecture; a Windows `.exe` cannot run on Linux or macOS. Python 3.11 or 3.12 is a practical choice for the scientific dependencies.
+The encoder uses native GCC/Clang, FFmpeg development libraries, x264 and `pkg-config`. Python scripts discover tools on PATH and use the same build helper. Pipelines reuse a local encoder only when its build record matches the current C source, OS and CPU architecture; changed source triggers a rebuild. Binaries must be built separately for each OS and CPU architecture; a Windows `.exe` cannot run on Linux or macOS. Use the pinned CPython 3.14.4 scientific environment described in [ENVIRONMENT.md](../ENVIRONMENT.md).
 
 ## Native dependencies
 
@@ -39,24 +39,24 @@ VMAF also requires `libvmaf` in the installed FFmpeg build. Check with `ffmpeg -
 
 ## Python environment
 
-From the repository root:
+From the repository root, use the locked project environment:
 
 ```bash
-python -m venv venv
+python -m pip install uv==0.13.1
+uv sync --locked
+uv pip check
+uv run --locked python Encoder/build.py
 ```
 
-Activate with `source venv/bin/activate` on Linux/macOS, or `.\venv\Scripts\Activate.ps1` in Windows PowerShell. Then:
-
-```bash
-python -m pip install -r requirements.txt
-python Encoder/build.py
-```
+Use `uv run --locked python ...` below, or activate `.venv/bin/activate` on Linux/macOS or `.\.venv\Scripts\Activate.ps1` on Windows. See [environment details](../ENVIRONMENT.md) for the Python/package pins, optional dependencies and validation scope.
 
 This creates `Encoder/encoder` on Linux/macOS and `Encoder/encoder.exe` on Windows. Model inference uses the single input/output CoordConv architecture in `gaze_model.py` and a compatible trained checkpoint. The default is `DIEM/DIEM_model.pt`, resolved from the repository root, or select `--checkpoint PATH`. Missing/incompatible checkpoints fail explicitly. Loading complete weights does not download pretrained backbone initialization. CUDA is optional; CPU inference also runs on all three OSes. Dataset and checkpoint files still need to be supplied.
 
 ## Encode and evaluate
 
 Defaults discover every supported video in project-root `input video/` and write all final videos directly into `output file/` as `compressed_<input stem>.mp4` (with a short suffix for colliding stems). Script and default data paths resolve from their files, so invoking a script by its absolute path works from other directories.
+
+Y4M (YUV4MPEG2) inputs are supported directly, including `.y4m` and `.Y4M` extensions. Put them in `input video/` or select one with `--video "input video/clip.y4m"`. The source is used directly for frame decoding and evaluation; final compressed outputs are H.264 MP4 files.
 
 ```bash
 python Encoder/run_pipeline.py
@@ -87,6 +87,43 @@ python Encoder/evaluate_compression.py --ffmpeg PATH_TO_FFMPEG --ffprobe PATH_TO
 
 The evaluator can also discover executables inside the Python virtual environment when invoking its Python directly without activation. See [compression metrics](COMPRESSION_METRICS.md) for report definitions.
 
-DIEM raw annotations default to `DIEM/DIEM_ROOT`; stimulus videos are matched by stem in the shared `input video/` folder. Prepared DIEM data defaults to `output file/diem`. Set `DIEM_ROOT` and `DIEM_OUTPUT_ROOT` environment variables to override those locations. Calibration overlays use the OS temporary directory.
+Pixel metrics default to `--device auto`, which uses a CUDA GPU when PyTorch
+can access one and otherwise uses the threaded CPU evaluator. On an RTX 4060
+Laptop GPU, a 24-frame 4K sample including VMAF and exports took 5.7 seconds
+versus 10.7 seconds with four CPU workers. This is a sample benchmark, not a
+guarantee for every video. Force CUDA with `--device cuda` (fails explicitly if
+unavailable), or use `--device cpu` for the original CPU arithmetic. Automatic
+mode falls back to CPU if CUDA initialization or scoring fails; the log records
+the reason and `metric_device` in the exports records the backend used.
+
+CUDA accelerates PSNR/MSE, SSIM and all five MS-SSIM scales using IEEE float32
+convolutions and float64 metric reductions; it does not use TF32/half precision.
+SSIM can differ slightly from OpenCV due to convolution/reduction order (less
+than 0.00001 in the 4K sample); MSE/PSNR matched exactly. Record the backend when
+comparing experiments. Luma conversion, video decoding and VMAF remain on CPU.
+
+CPU pixel metrics run on a bounded pool of frame workers. The default `--workers 0`
+selects up to eight workers using the available CPU count and RAM; 4K SSIM needs
+large temporary arrays, so increasing workers indefinitely can slow evaluation
+or cause swapping. Override with `--workers 4`, or use `--workers 1` for serial
+scoring. VMAF uses up to eight CPU threads by default, configurable with
+`--vmaf-threads`; each input decoder uses `--decoder-threads 2`. Frame workers
+apply to the CPU path; CUDA scores one frame at a time to bound VRAM. All frames and all five
+MS-SSIM scales are scored. Frame order, shared ROI masks, metric pooling and
+encoder/pipeline throughput definitions are preserved. The log reports pixel
+scoring progress and separate pixel/VMAF wall times.
+
+```bash
+python Encoder/evaluate_compression.py --device auto --vmaf-threads 8
+python Encoder/evaluate_compression.py --device cpu --workers 4 --vmaf-threads 8
+```
+
+DIEM preparation and training use only each stimulus in `DIEM/DIEM_ROOT/<video_name>/video/`, alongside the raw annotation folders. Prepared DIEM data defaults to `output file/diem`. Set `DIEM_ROOT` and `DIEM_OUTPUT_ROOT` environment variables to override those locations. The shared `input video/` folder selects encoder inputs separately. Calibration overlays use the OS temporary directory.
 
 Dataset statistics are exported alongside the existing per-video metrics in `output file/compression_evaluation/`. They use equal video weights, video-bootstrap intervals and paired video-level tests; per-video BD deltas are pooled separately. See the root README for the common `run_dataset.py` interface. Run regression checks with `python -m unittest discover -s tests -v`.
+
+## Shared GazeLNN input preprocessing
+
+Gaze inference now uses `gaze_preprocessing.py`, the same RGB resize/scaling/ImageNet normalization as DIEM and OSIE/MIT training. A checkpoint's `input_preprocessing` declaration is honored automatically. Historical weights without one emit an unknown-history warning; select `--preprocessing legacy_rgb01` only when reproducing independently known [0,1] training. The option is forwarded by the single/batch pipeline, sweep and dataset runner. Preprocessing cannot change within a recurrent sequence without resetting model state.
+
+Generated QP metadata records the active profile, training-policy verification status and shared preprocessing implementation hash. `--reuse-qp` rejects missing/mismatched preprocessing, including caches generated before this contract. Regenerate maps without `--reuse-qp`; do not relabel old cache metadata.
