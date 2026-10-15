@@ -1,0 +1,9 @@
+{
+  "model": "DeepGazeI (authors' PyTorch retraining)",
+  "weights_url": "https://github.com/matthias-k/DeepGaze/releases/download/v1.01/deepgaze1.pth",
+  "source_repository": "https://github.com/matthias-k/DeepGaze",
+  "source_revision": "c33b89f08016e41e68cec4e4d9f1a73a14211386",
+  "sha256": "1dffa45f1fb5a8fb97c91a5fbaa2722cb061dded31e9d38468d295c703241d94",
+  "bytes": 244412378,
+  "training_data": "MIT1003, per upstream model documentation"
+}

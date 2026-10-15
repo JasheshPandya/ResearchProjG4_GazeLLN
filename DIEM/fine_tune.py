@@ -63,6 +63,7 @@ else:
     from dataset import build_datasets, VideoOrderedBatchSampler
 from gaze_model import GazeLLNArch, load_model_weights
 from project_paths import OSIE_CHECKPOINT, DIEM_CHECKPOINT
+from DIEM.splits import record_training
 
 
 def _gaussian_heatmap(x, y, img_w, img_h, hmap_w, hmap_h, sigma=1.5):
@@ -149,6 +150,8 @@ def run_window(model, batch, state_store: VideoStateStore, device,
                ts_mode: str = "real", teacher_forcing: bool = False,
                train_backbone: bool = False):
     """Returns: predictions (B,T,Hg,Wg), targets (B,T,Hg,Wg), valid (B,T) bool"""
+    if ts_mode != "real":
+        raise ValueError("Video models use elapsed seconds; ts_mode must be real")
     frames = batch["frames"].to(device)
     heatmaps = batch["heatmaps"].to(device)
     valid = batch["valid"].to(device)
@@ -172,7 +175,7 @@ def run_window(model, batch, state_store: VideoStateStore, device,
 
     predictions = []
     for t in range(T):
-        ts_t = delta_t[:, t] if ts_mode == "real" else torch.ones(B, device=device)
+        ts_t = delta_t[:, t]
 
         out_hmap, hx = model(vis_features_all[:, t], prev_hmap, hx, ts_t)
         predictions.append(out_hmap.squeeze(1))
@@ -269,7 +272,18 @@ def fine_tune(
     pretrained_checkpoint: Optional[str] = None,
     checkpoint: str = DIEM_CHECKPOINT,
     use_amp: bool = True,
+    split_manifest: Optional[str] = None,
 ):
+    manifest_path = Path(split_manifest or getattr(train_loader.dataset, "split_manifest", cfg.SPLIT_MANIFEST)).resolve()
+    train_names = [e.name for e in train_loader.dataset.entries]
+    val_names = [e.name for e in val_loader.dataset.entries]
+    # Validate provenance before any optimization; final record also binds the exact saved weights.
+    from DIEM.splits import read_manifest
+    manifest = read_manifest(manifest_path)
+    if set(train_names) != set(manifest["splits"]["train"]) or set(val_names) != set(manifest["splits"]["val"]):
+        raise ValueError("Training and validation loaders differ from persisted splits")
+    if ts_mode != "real":
+        raise ValueError("Video training requires elapsed-time ts_mode=real")
     if pretrained_checkpoint is not None:
         load_model_weights(model, pretrained_checkpoint, device)
         print(f"Loaded pretrained checkpoint {pretrained_checkpoint}")
@@ -323,6 +337,9 @@ def fine_tune(
             best_val_loss = val_loss
             epochs_no_improve = 0
             torch.save(model.state_dict(), checkpoint)
+            record_training(checkpoint, manifest_path, train_names, val_names,
+                            ts_mode="real", fps=cfg.GAZE_FPS, teacher_forcing=teacher_forcing,
+                            train_backbone=effective_train_backbone, epoch=epoch, val_loss=val_loss)
             print("  <- saved best model", end="")
         else:
             epochs_no_improve += 1
@@ -366,10 +383,9 @@ if __name__ == "__main__":
         # alternative, just not what OSIE.pt was trained with.
         teacher_forcing=False,
 
-        # "real" uses actual per-frame delta_t (1/fps) -- matches
-        # trainGazeLNN.py's current dt_seq usage. "constant_one" instead
-        # fixes ts=1.0 for every step.
+        # Shared video convention: actual per-frame delta_t (1/fps), in seconds.
         ts_mode="real",
+        split_manifest=str(cfg.SPLIT_MANIFEST),
 
         videos_per_batch=8,
         device="cuda" if torch.cuda.is_available() else "cpu",
@@ -383,7 +399,7 @@ if __name__ == "__main__":
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    train_ds, val_ds, test_ds = build_datasets()
+    train_ds, val_ds, test_ds = build_datasets(split_manifest=RUN_CONFIG["split_manifest"])
 
     train_loader = DataLoader(
         train_ds,
@@ -415,4 +431,5 @@ if __name__ == "__main__":
         pretrained_checkpoint=RUN_CONFIG["pretrained_checkpoint"],
         checkpoint=RUN_CONFIG["checkpoint"],
         use_amp=RUN_CONFIG["use_amp"],
+        split_manifest=RUN_CONFIG["split_manifest"],
     )

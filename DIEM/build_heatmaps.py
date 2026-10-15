@@ -47,7 +47,7 @@ def get_native_resolution(video_name: str, diem_root: Path) -> Tuple[int, int]:
     folder names consistently end this way in both samples checked so far,
     e.g. ..._1280x720, ..._720x576) if ffprobe is unavailable or fails."""
     video_dir = diem_root / video_name
-    matches = sorted(video_dir.glob(cfg.VIDEO_FILE_GLOB))
+    matches = cfg.video_files(video_dir)
     if matches:
         try:
             out = subprocess.run(
@@ -254,7 +254,7 @@ def main():
             continue
         print(f"Building heatmaps for {vd.name} ...")
         heatmaps, valid, calib_info = build_video_heatmaps(vd.name, fixations_root, cfg.DIEM_ROOT)
-        np.savez_compressed(out_path, heatmaps=heatmaps, valid=valid)
+        np.savez_compressed(out_path, heatmaps=heatmaps, valid=valid, fps=cfg.GAZE_FPS)
         print(f"  calibration: {calib_info}")
         print(f"  {valid.sum()}/{len(valid)} frames valid -> {out_path}")
         existing_rows[vd.name] = dict(

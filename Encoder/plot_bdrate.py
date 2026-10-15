@@ -20,6 +20,12 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter, LogLocator, NullFormatter
 import numpy as np
 
+import sys
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from project_paths import OUTPUT_FILE_DIR
+
 if __package__:
     from .evaluate_compression import (bd_rate, validate_rd, SUMMARY_METRICS,
                                        load_roi_source, resolve_manifest_path, to_luma)
@@ -586,7 +592,7 @@ def generate_plots(csv_path, out_dir=None, manifest_path=None, clip_name=None, f
 
 
 def default_csv():
-    return Path(__file__).resolve().parent / "ablation_out/eval_results/results_detailed.csv"
+    return OUTPUT_FILE_DIR / "compression_evaluation" / "results_detailed.csv"
 
 
 def main():

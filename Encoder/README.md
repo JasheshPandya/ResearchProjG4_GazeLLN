@@ -56,7 +56,7 @@ This creates `Encoder/encoder` on Linux/macOS and `Encoder/encoder.exe` on Windo
 
 ## Encode and evaluate
 
-Defaults use `Encoder/sample_video.mp4`, with case-sensitive spelling on Linux/macOS. Script and default data paths resolve from their files, so invoking a script by its absolute path works from other directories.
+Defaults discover every supported video in project-root `input video/` and write all final videos directly into `output file/` as `compressed_<input stem>.mp4` (with a short suffix for colliding stems). Script and default data paths resolve from their files, so invoking a script by its absolute path works from other directories.
 
 ```bash
 python Encoder/run_pipeline.py
@@ -65,9 +65,9 @@ python Encoder/evaluate_compression.py
 python Encoder/plot_bdrate.py --metric psnr_roi
 ```
 
-Choose another video/output with `--video`, `--output` (single encode), `--out-dir` (sweep), and `--qp-dir`. Use `--crfs 18 21 24 27 30 33` to set sweep points. Manifest paths are relative to the manifest, written with forward slashes, and work with Windows and Unix path separators.
+Use `--input-dir` and `--output-dir` for the shared directories. Choose a single source with `--video`, and optionally `--output` or `--qp-dir` for that one video. The sweep accepts `--out-dir` as an alias for `--output-dir`. Each sweep writes one manifest containing all clips and uniquely named method/CRF outputs directly in the shared output folder. Add `--evaluate` to score the completed manifest immediately. Use `--crfs 18 21 24 27 30 33` to set sweep points. Manifest paths are relative to the manifest, written with forward slashes, and work with Windows and Unix path separators.
 
-Add `--methods uniform gaze center motion` to include center-Gaussian and causal frame-difference baselines. The evaluator reports each method against uniform and gaze against the other baselines, with a shared clip-level scoring mask. See [baseline definitions and gaze-prediction evaluation](../Baselines/README.md).
+Add `--methods uniform gaze center motion static_saliency` to include center-Gaussian, frame-difference and trained frame-independent DeepGaze I baselines. Static saliency uses the pinned dependencies in `requirements-static-saliency.txt` and downloaded `checkpoints/deepgaze1.pth`; it requires temporal alpha 1. The evaluator reports each method against uniform and gaze against the other baselines, with a shared clip-level scoring mask. See [baseline definitions and gaze-prediction evaluation](../Baselines/README.md).
 
 To repair existing encodes while keeping the already generated QP maps for the **same source video**:
 
@@ -75,7 +75,9 @@ To repair existing encodes while keeping the already generated QP maps for the *
 python Encoder/run_ablation_sweep.py --reuse-qp
 ```
 
-The cached maps' count, grid and file sizes are checked before use. Content provenance cannot be inferred from those checks; do not reuse maps from another clip. Generation/pipeline timings remain unavailable for cached gaze maps rather than inventing inference time. Add `--skip-build` to reuse a previously rebuilt native encoder, or `--encoder PATH` for another prebuilt native executable. Encoded files are replaced only after the frame count, dimensions and frame rate pass validation.
+Cached maps are checked for frame count, grid, file sizes, source SHA-256, checkpoint SHA-256 and generation settings. Old caches lacking this provenance must be regenerated. Each video has an isolated cache under the shared output's `_work/<video-id>/qp_gaze`. Generation/pipeline timings remain unavailable for cached gaze maps rather than inventing inference time. Add `--skip-build` to reuse a previously rebuilt native encoder, or `--encoder PATH` for another prebuilt native executable. Encoded files are replaced only after the frame count, dimensions and frame rate pass validation.
+
+Gaze inference now uses elapsed seconds, `dt = 1 / source FPS`, matching video training/evaluation. Cached maps must also carry the matching `dt_policy` and `dt_seconds`; legacy caches are rejected. Regenerate without `--reuse-qp` before comparing results from the new convention.
 
 For custom FFmpeg installations:
 
@@ -85,6 +87,6 @@ python Encoder/evaluate_compression.py --ffmpeg PATH_TO_FFMPEG --ffprobe PATH_TO
 
 The evaluator can also discover executables inside the Python virtual environment when invoking its Python directly without activation. See [compression metrics](COMPRESSION_METRICS.md) for report definitions.
 
-DIEM defaults now resolve from its script directory (`DIEM/DIEM_ROOT`, `DIEM/DIEM_Processed`). Set `DIEM_ROOT` and `DIEM_OUTPUT_ROOT` environment variables to override those locations. Calibration overlays use the OS temporary directory.
+DIEM raw annotations default to `DIEM/DIEM_ROOT`; stimulus videos are matched by stem in the shared `input video/` folder. Prepared DIEM data defaults to `output file/diem`. Set `DIEM_ROOT` and `DIEM_OUTPUT_ROOT` environment variables to override those locations. Calibration overlays use the OS temporary directory.
 
-Verification-only regression files and their test-only CI workflow were removed after use. The build, encoding and scientific evaluation tools remain available.
+Dataset statistics are exported alongside the existing per-video metrics in `output file/compression_evaluation/`. They use equal video weights, video-bootstrap intervals and paired video-level tests; per-video BD deltas are pooled separately. See the root README for the common `run_dataset.py` interface. Run regression checks with `python -m unittest discover -s tests -v`.

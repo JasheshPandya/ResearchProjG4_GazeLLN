@@ -1,4 +1,4 @@
-"""Shared scanpath KL-DTW loss converted from the OSIE training notebook."""
+"""Shared scanpath KL-DTW loss."""
 
 import torch
 import torch.nn as nn

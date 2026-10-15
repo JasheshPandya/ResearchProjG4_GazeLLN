@@ -1,0 +1,4 @@
+# Optional trained static baseline; upstream source is pinned for reproducibility.
+-r requirements.txt
+boltons==26.2.0
+deepgaze_pytorch @ git+https://github.com/matthias-k/DeepGaze.git@c33b89f08016e41e68cec4e4d9f1a73a14211386

@@ -19,5 +19,23 @@ DIEM/DIEM_ROOT/
 Encoder/empty_qp_dir/
 Encoder/qp_dir/
 Encoder/ablation_out/eval_results/vmaf_logs
+Encoder/ablation_out/eval_results/per_frame
+Encoder/ablation_out/eval_results/run.log
+Encoder/ablation_out/eval_results/plots/plots.json
+Encoder/ablation_out/eval_results/plots/README.md
+Encoder/encoder.exe
+Encoder/encoder.build.json
+Encoder/encoder
 
 venv/
+PROJECT_STRUCTURE.md
+test/
+
+# Large reproducibly downloaded static-saliency checkpoint
+checkpoints/deepgaze1.pth
+
+# Shared video pipeline artifacts (keep directory instructions)
+input video/*
+!input video/README.md
+output file/*
+!output file/README.md

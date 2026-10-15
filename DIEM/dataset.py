@@ -40,10 +40,20 @@ from typing import List, Tuple
 
 import numpy as np
 
+import sys
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+from video_timing import frame_interval
+
 if __package__:
     from . import config as cfg
+    from .splits import persisted_split
+    from .splits import read_manifest
 else:
     import config as cfg
+    from splits import persisted_split
+    from splits import read_manifest
 
 try:
     import torch
@@ -86,31 +96,30 @@ def _discover_videos(processed_root: Path, frames_root: Path) -> List[VideoEntry
             continue
         with np.load(npz_path) as d:
             num_frames = d["valid"].shape[0]
+            annotation_fps = float(d["fps"]) if "fps" in d else cfg.GAZE_FPS
+        if not np.isclose(annotation_fps, cfg.GAZE_FPS, rtol=1e-4):
+            raise ValueError(f"{video_name}: target FPS differs from configured DIEM annotation rate")
+        source_videos = cfg.video_files(cfg.DIEM_ROOT / video_name)
+        if source_videos:
+            import cv2
+            cap = cv2.VideoCapture(str(source_videos[0]))
+            try:
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                frame_interval(fps)
+                if not np.isclose(fps, annotation_fps, rtol=1e-4):
+                    raise ValueError(f"{video_name}: source FPS and gaze time base differ; align before training")
+            finally:
+                cap.release()
         entries.append(VideoEntry(video_name, frames_dir, npz_path, num_frames))
     return entries
 
 
-def split_videos(entries: List[VideoEntry], val_frac=0.15, test_frac=0.15, seed=0):
-    """Video-level train/val/test split -- never split a single video's
-    frames across sets, since adjacent/nearby frames of the same video are
-    highly correlated in content and gaze behavior."""
-    rng = np.random.RandomState(seed)
-    idx = np.arange(len(entries))
-    rng.shuffle(idx)
-    n = len(entries)
-    n_val = max(1, int(n * val_frac))
-    n_test = max(1, int(n * test_frac))
-    val_idx = set(idx[:n_val].tolist())
-    test_idx = set(idx[n_val:n_val + n_test].tolist())
-    train, val, test = [], [], []
-    for i, e in enumerate(entries):
-        if i in val_idx:
-            val.append(e)
-        elif i in test_idx:
-            test.append(e)
-        else:
-            train.append(e)
-    return train, val, test
+def split_videos(entries: List[VideoEntry], val_frac=0.15, test_frac=0.15, seed=0, manifest_path=None):
+    """Create once, then strictly reuse exact persisted video memberships."""
+    manifest = persisted_split([e.name for e in entries], manifest_path or cfg.SPLIT_MANIFEST,
+                               seed=seed, val_frac=val_frac, test_frac=test_frac)
+    by_name = {e.name: e for e in entries}
+    return tuple([by_name[name] for name in manifest["splits"][part]] for part in ("train", "val", "test"))
 
 
 class DIEMWindowDataset(Dataset):
@@ -179,7 +188,7 @@ class DIEMWindowDataset(Dataset):
         frames_t = torch.from_numpy(frames).float().permute(0, 3, 1, 2) / 255.0  # (T,3,H,W)
         heatmaps_t = torch.from_numpy(heatmaps).float()                          # (T,H,W)
         valid_t = torch.from_numpy(valid.copy())                                 # (T,)
-        delta_t = torch.full((T,), 1.0 / cfg.GAZE_FPS, dtype=torch.float32)
+        delta_t = torch.full((T,), frame_interval(cfg.GAZE_FPS), dtype=torch.float32)
 
         if self.transform is not None:
             frames_t = self.transform(frames_t)
@@ -281,7 +290,7 @@ class VideoOrderedBatchSampler(Sampler):
         return total
 
 
-def build_datasets(processed_root: Path = None, frames_root: Path = None):
+def build_datasets(processed_root: Path = None, frames_root: Path = None, split_manifest: Path = None):
     processed_root = processed_root or cfg.OUTPUT_ROOT
     frames_root = frames_root or (cfg.OUTPUT_ROOT / "frames")
     entries = _discover_videos(processed_root, frames_root)
@@ -290,10 +299,13 @@ def build_datasets(processed_root: Path = None, frames_root: Path = None):
             "No videos discovered -- check that build_heatmaps.py has been run "
             "and that video frames have been extracted to OUTPUT_ROOT/frames/<video_name>/"
         )
-    train_e, val_e, test_e = split_videos(entries)
+    manifest_path = Path(split_manifest or cfg.SPLIT_MANIFEST).resolve()
+    parameters = read_manifest(manifest_path) if manifest_path.is_file() else {}
+    train_e, val_e, test_e = split_videos(entries, manifest_path=manifest_path,
+        seed=parameters.get("seed", 0), val_frac=parameters.get("val_fraction", 0.15),
+        test_frac=parameters.get("test_fraction", 0.15))
     print(f"videos: train={len(train_e)} val={len(val_e)} test={len(test_e)}")
-    return (
-        DIEMWindowDataset(train_e),
-        DIEMWindowDataset(val_e),
-        DIEMWindowDataset(test_e),
-    )
+    datasets = (DIEMWindowDataset(train_e), DIEMWindowDataset(val_e), DIEMWindowDataset(test_e))
+    for dataset in datasets:
+        dataset.split_manifest = manifest_path
+    return datasets

@@ -1,4 +1,4 @@
-"""Evaluate the shared CoordConv GazeLNN on MIT scanpaths."""
+"""Evaluate OSIE trained model on MIT scanpaths."""
 
 import argparse
 from pathlib import Path

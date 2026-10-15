@@ -16,7 +16,9 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from gaze_model import GazeLLNArch, load_gaze_model
-from project_paths import DIEM_CHECKPOINT
+from project_paths import (DIEM_CHECKPOINT, INPUT_VIDEO_DIR, OUTPUT_FILE_DIR,
+                           discover_videos, video_id, file_sha256)
+from video_timing import DT_POLICY, frame_interval
 
 def mb_grid(native_width = 1920, native_height = 1080):
     """
@@ -58,7 +60,12 @@ def _init_center_gaussian(batch_size=1, hmap_h=32, hmap_w=48, sigma=1.5):
 
 
 
-def call_model(frame: np.ndarray, checkpoint_path: str = None, dt: float = 1) -> torch.Tensor:
+def reset_model_state():
+    for key in ("model", "device", "prev_hmap", "hx"):
+        _MODEL_CACHE[key] = None
+
+
+def call_model(frame: np.ndarray, checkpoint_path: str = None, *, dt: float) -> torch.Tensor:
     """
     Passes a video frame [H, W, C] (OpenCV BGR) through GazeLLNArch and returns the saliency heatmap.
 
@@ -67,9 +74,11 @@ def call_model(frame: np.ndarray, checkpoint_path: str = None, dt: float = 1) ->
         dt: The time delta between the current frame and the previous frame.
 
     Returns:
-        hmap: 3D torch.Tensor [1, mb_height: 32, mb_width: 48] representing the saliency map.
+        hmap: torch.Tensor [1, 32, 48] representing the saliency probability map.
     """
     global _MODEL_CACHE
+    if not np.isfinite(dt) or dt <= 0:
+        raise ValueError("Explicit elapsed frame time in seconds must be positive and finite")
 
     if _MODEL_CACHE["model"] is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -183,8 +192,7 @@ def main(sys_args=None):
     parser.add_argument(
         "--output_dir",
         type=Path,
-        required=True,
-        help="Directory for output .bin QP offset files",
+        help="Single-video QP directory override; default: shared output/_work/<video>/qp_gaze",
     )
     parser.add_argument(
         "--qp_min",
@@ -214,17 +222,33 @@ def main(sys_args=None):
         ),
     )
 
+    parser.add_argument("--input-dir", type=Path, default=INPUT_VIDEO_DIR)
+    parser.add_argument("--output-dir", dest="output_dir_root", type=Path, default=OUTPUT_FILE_DIR)
     args = parser.parse_args(sys_args)
     if args.checkpoint is not None and not args.checkpoint.is_file():
         parser.error(f"Checkpoint not found: {args.checkpoint}")
 
     # Validate arguments
+    if not np.isfinite([args.qp_min, args.qp_max, args.spatial_sigma]).all() or args.spatial_sigma < 0:
+        parser.error("QP limits and spatial sigma must be finite; sigma must be nonnegative")
     if args.qp_min >= args.qp_max:
         parser.error(f"qp_min ({args.qp_min}) must be less than qp_max ({args.qp_max})")
     if not (0.0 <= args.temporal_alpha <= 1.0):
         parser.error(f"temporal_alpha must be in [0, 1], got {args.temporal_alpha}")
-    if not args.video_path:
-        parser.error("--video_path must be specified.")
+    try:
+        videos = discover_videos(args.input_dir, args.video_path)
+        if args.output_dir and len(videos) != 1:
+            raise ValueError("--output_dir requires exactly one input video")
+        for video in videos:
+            options = argparse.Namespace(**vars(args))
+            options.video_path = video
+            options.output_dir = args.output_dir or args.output_dir_root / "_work" / video_id(video) / "qp_gaze"
+            generate_video(options)
+    except (ValueError, OSError, RuntimeError) as exc:
+        parser.exit(1, f"QP generation failed: {exc}\n")
+
+
+def generate_video(args):
 
     # Discover and load heatmaps
     heatmaps = []
@@ -237,6 +261,9 @@ def main(sys_args=None):
     native_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     native_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+    dt = frame_interval(fps)
+    reset_model_state()
 
     frame_idx = 0
     while True:
@@ -244,7 +271,7 @@ def main(sys_args=None):
         if not ret:
             break
 
-        hm = call_model(frame, checkpoint_path=args.checkpoint)
+        hm = call_model(frame, checkpoint_path=args.checkpoint, dt=dt)
 
         # Append torch.Tensor directly (already torch.float32)
         heatmaps.append(hm)
@@ -252,6 +279,8 @@ def main(sys_args=None):
 
     cap.release()
     num_frames = len(heatmaps)
+    if num_frames == 0:
+        raise ValueError(f"No decoded frames: {args.video_path}")
     print(f"Generated {num_frames} heatmaps using the model")
 
     mb_width, mb_height = mb_grid(native_width, native_height)
@@ -292,6 +321,12 @@ def main(sys_args=None):
 
     # Write metadata
     metadata = {
+        "source_video": str(args.video_path.resolve()),
+        "source_sha256": file_sha256(args.video_path),
+        "checkpoint_sha256": file_sha256(args.checkpoint or DIEM_CHECKPOINT),
+        "dt_policy": DT_POLICY,
+        "fps": fps,
+        "dt_seconds": dt,
         "num_frames": num_frames,
         "mb_width": int(mb_width),
         "mb_height": int(mb_height),
@@ -321,15 +356,4 @@ def main(sys_args=None):
     print(f"  Median: {np.median(all_offsets):.2f}")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        main()
-    else:
-        # Fallback default runner behavior
-        main([
-            "--video_path", "sample_video.mp4",
-            "--output_dir", "qp_dir",
-            "--qp_min", "-6.0",
-            "--qp_max", "6.0",
-            "--spatial_sigma", "0.0",
-            "--temporal_alpha", "1.0"
-        ])
+    main()

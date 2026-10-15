@@ -228,7 +228,17 @@ batch is ready to go straight into `GazeLLNArch.forward()` (via
    starting point, not a tuned value.
 5. **Subject-count filtering** (`MIN_SUBJECTS_PER_FRAME`) -- check the
    `valid.mean()` printed by `build_heatmaps.py` per video.
-6. **Time-step consistency**: continuous DIEM training uses `1/30` seconds per frame, while the encoder's inference default is still `dt=1`. Align these conventions before a joint scientific comparison.
+6. **Time-step consistency**: video training, encoder inference and gaze evaluation share `video_timing.py`: elapsed seconds, `dt=1/FPS`. DIEM's annotation rate is 30 Hz. Source/annotation FPS mismatch is rejected; align mismatched inputs explicitly. Old encoder maps generated with `dt=1` need regeneration.
+
+## Frozen video splits and checkpoint provenance
+
+`DIEM/splits.json` records the current 82 raw video identifiers as 58 train, 12 validation and 12 test, using seed 0. This is a new frozen experiment assignment, not recovered history for the existing checkpoint.
+
+`python -m DIEM.splits` verifies the raw inventory against it. For a smaller cohort, create a separately named manifest with `--output PATH --videos VIDEO_A VIDEO_B VIDEO_C` and point `DIEM_SPLIT_MANIFEST` at it. Prepared data must match the entire selected cohort. Discovery order does not affect stored membership; new or missing videos produce an error. `--extend` explicitly appends new raw videos to train, preserving every old membership. `--overwrite` intentionally replaces assignments and invalidates earlier checkpoint provenance.
+
+`build_datasets()` loads saved memberships and puts the manifest path on each dataset. `fine_tune.py` verifies train/validation loader membership and records `<checkpoint>.training.json` whenever it saves the best model. This sidecar binds the exact weights to the manifest hash, complete video lists, elapsed-time policy and run settings.
+
+Gaze evaluation defaults to test membership plus matching learned-checkpoint/prediction provenance. Historical checkpoints have no invented sidecar; `--allow-unverified-checkpoint` is an explicitly labelled diagnostic override. `--split train`/`val` and `--no-split-check` do not establish held-out performance.
 
 ## Shared model and checkpoint
 
@@ -256,3 +266,7 @@ All scripts now use `gaze_model.GazeLLNArch`, with mandatory input and output Co
   for training, worth knowing if debugging subtle misalignment later.
 
 
+
+## Shared video paths
+
+Put stimulus videos in project-root `input video/`, named with the same stem as their raw DIEM annotation folder. All video probing, frame extraction and training FPS checks use that shared folder. Ambiguous equal stems are rejected. `GAZELNN_INPUT_DIR` overrides it. Raw subject annotations still use `DIEM_ROOT`; prepared fixations, heatmaps, frames and calibration reports default to `output file/diem` (`GAZELNN_OUTPUT_DIR` or the explicit legacy `DIEM_OUTPUT_ROOT` can override it). Existing prepared data is preserved; point `DIEM_OUTPUT_ROOT` at it or regenerate. New filenames require their own genuine annotations and explicit split membership before gaze training/evaluation.

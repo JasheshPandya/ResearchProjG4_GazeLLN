@@ -22,10 +22,10 @@ import config as cfg
 
 def extract_frames_for_video(video_dir: Path, frames_root: Path) -> None:
     video_name = video_dir.name
-    matches = sorted(video_dir.glob(cfg.VIDEO_FILE_GLOB))
+    matches = cfg.video_files(video_dir)
     if not matches:
         print(f"  [WARN] no video file found in {video_dir} "
-              f"(pattern={cfg.VIDEO_FILE_GLOB}) -- check config.VIDEO_FILE_GLOB")
+              f"-- put a matching video in {cfg.INPUT_VIDEO_DIR}")
         return
     video_path = matches[0]
 

@@ -7,6 +7,12 @@ import sys
 import tempfile
 import time
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+from video_timing import DT_POLICY, frame_interval
+from project_paths import DIEM_CHECKPOINT, file_sha256
+
 if __package__:
     from .build import WORK_DIR, build_encoder, encoder_path, is_current_encoder
 else:
@@ -71,6 +77,14 @@ def prepare_qp_maps(video, qp_dir, reuse=False, env=None, qp_min=-3, qp_max=10,
                     spatial_sigma=1.5, temporal_alpha=1, checkpoint=None):
     if reuse:
         validate_qp_maps(video, qp_dir)
+        metadata = json.loads((Path(qp_dir) / "metadata.json").read_text())
+        expected = dict(source_sha256=file_sha256(video), checkpoint_sha256=file_sha256(checkpoint or DIEM_CHECKPOINT),
+                        qp_min=qp_min, qp_max=qp_max, spatial_sigma=spatial_sigma, temporal_alpha=temporal_alpha)
+        if any(metadata.get(key) != value for key, value in expected.items()):
+            raise RuntimeError("Cached gaze maps do not match source content/checkpoint/settings. Regenerate without --reuse-qp.")
+        fps = video_info(video)[3]
+        if metadata.get("dt_policy") != DT_POLICY or abs(metadata.get("dt_seconds", -1) - frame_interval(fps)) > 1e-9:
+            raise RuntimeError("Cached gaze maps use an unknown/old time convention. Regenerate without --reuse-qp.")
         print(f"Reusing validated QP maps: {qp_dir}")
         return None  # Generation time was not measured during this run.
     start = time.perf_counter()
